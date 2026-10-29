@@ -68,32 +68,177 @@ object SysInfo {
         return if (ok) out else null
     }
 
-    /** CPU/SoC temperature in Celsius, or -1 when unreadable. */
-    fun temp(): Double {
-        var best = -1.0
-        var bestScore = -1
-        val zones = File("/sys/class/thermal").listFiles()?.filter { it.name.startsWith("thermal_zone") } ?: emptyList()
-        for (z in zones) {
-            val raw = readLong(File(z, "temp")) ?: continue
-            val c = if (raw > 1000) raw / 1000.0 else raw.toDouble()
-            if (c < 5.0 || c > 130.0) continue
-            val type = (readText(File(z, "type")) ?: "").lowercase()
-            val score = when {
-                type.contains("cpu") || type.contains("soc") || type.contains("big") ||
-                    type.contains("little") || type.contains("tsens") || type.contains("core") -> 3
-                type.contains("gpu") || type.contains("ddr") || type.contains("battery") -> 1
-                else -> 2
+    class Sensor(val path: String, val name: String, val c: Double)
+
+    private fun readNum(f: File): Double? =
+        readText(f)?.split(Regex("\\s+"))?.firstOrNull()?.toDoubleOrNull()
+
+    /** Raw kernel values are usually millidegrees; some chips report tenths or whole degrees. */
+    private fun norm(raw: Double): Double = when {
+        raw > 1000.0 -> raw / 1000.0
+        raw in 200.0..1300.0 -> raw / 10.0
+        else -> raw
+    }
+
+    /** Standard places: thermal zones (both sysfs roots) and hwmon. */
+    fun sensors(): List<Sensor> {
+        val out = ArrayList<Sensor>()
+        val seen = HashSet<String>()
+        for (d in listOf("/sys/class/thermal", "/sys/devices/virtual/thermal")) {
+            val zones = File(d).listFiles()?.filter { it.name.startsWith("thermal_zone") } ?: emptyList()
+            for (z in zones) {
+                val f = File(z, "temp")
+                val v = readNum(f) ?: continue
+                val c = norm(v)
+                if (c < 1.0 || c > 150.0) continue
+                if (!seen.add(try { f.canonicalPath } catch (e: Exception) { f.path })) continue
+                out.add(Sensor(f.path, readText(File(z, "type")) ?: z.name, c))
             }
-            if (score > bestScore) { bestScore = score; best = c }
         }
-        if (best > 0) return best
         val hw = File("/sys/class/hwmon").listFiles() ?: emptyArray()
         for (h in hw) {
-            val raw = readLong(File(h, "temp1_input")) ?: continue
-            val c = if (raw > 1000) raw / 1000.0 else raw.toDouble()
-            if (c in 5.0..130.0) return c
+            val nm = readText(File(h, "name")) ?: h.name
+            val ts = h.listFiles()?.filter { it.name.matches(Regex("temp\\d+_input")) } ?: emptyList()
+            for (t in ts) {
+                val v = readNum(t) ?: continue
+                val c = norm(v)
+                if (c < 1.0 || c > 150.0) continue
+                if (!seen.add(try { t.canonicalPath } catch (e: Exception) { t.path })) continue
+                out.add(Sensor(t.path, nm + "/" + t.name, c))
+            }
         }
-        return -1.0
+        return out
+    }
+
+    private val nameRe = Regex("^(temp\\d*(_input)?|temperature|cpu_temp|chip_temp|soc_temp|.*_temp|tsensor.*)$", RegexOption.IGNORE_CASE)
+    private var deepCache: List<Sensor>? = null
+    private var deepAt = 0L
+
+    /**
+     * Vendor-neutral discovery for SoCs that do not use the standard thermal framework (e.g. some Goke boards):
+     * walks /sys/devices (depth-limited, symlinks skipped) looking for temperature-like files.
+     */
+    private fun deepScan(): List<Sensor> {
+        val now = System.currentTimeMillis()
+        val cached = deepCache
+        if (cached != null && now - deepAt < 300000L) return cached
+        val out = ArrayList<Sensor>()
+        var visited = 0
+        fun walk(d: File, depth: Int) {
+            if (depth > 6 || visited > 4000 || out.size >= 60) return
+            val kids = try { d.listFiles() } catch (e: Exception) { null } ?: return
+            for (k in kids) {
+                visited++
+                try {
+                    if (java.nio.file.Files.isSymbolicLink(k.toPath())) continue
+                    if (k.isDirectory) {
+                        if (k.name != "power" && k.name != "subsystem") walk(k, depth + 1)
+                    } else if (nameRe.matches(k.name)) {
+                        val v = readNum(k) ?: continue
+                        val c = norm(v)
+                        if (c in 10.0..120.0) out.add(Sensor(k.path, k.parentFile?.name + "/" + k.name, c))
+                    }
+                } catch (e: Exception) { }
+            }
+        }
+        walk(File("/sys/devices"), 0)
+        deepCache = out
+        deepAt = now
+        return out
+    }
+
+    private var dumpAt = 0L
+    private var dumpVal: Pair<Double, String>? = null
+
+    /** Needs: adb shell pm grant com.tvoshome.app android.permission.DUMP  (reads Android's thermal service). */
+    private fun dumpsys(): Pair<Double, String>? {
+        val now = System.currentTimeMillis()
+        if (now - dumpAt < 15000L) return dumpVal
+        dumpAt = now
+        dumpVal = null
+        try {
+            val p = Runtime.getRuntime().exec(arrayOf("dumpsys", "thermalservice"))
+            val txt = p.inputStream.bufferedReader().use { it.readText() }
+            p.destroy()
+            val re = Regex("Temperature\\{mValue=([-0-9.]+), mType=(\\d+), mName=([^,}]+)")
+            var best: Pair<Double, String>? = null
+            for (m in re.findAll(txt)) {
+                val v = m.groupValues[1].toDoubleOrNull() ?: continue
+                val type = m.groupValues[2]
+                val name = m.groupValues[3]
+                if (v in 10.0..120.0 && (type == "0" || best == null)) best = Pair(v, name)
+            }
+            dumpVal = best
+        } catch (e: Exception) { }
+        return dumpVal
+    }
+
+    private fun pick(l: List<Sensor>): Sensor? {
+        var best: Sensor? = null
+        var bs = -1
+        for (s in l) {
+            if (s.c < 10.0 || s.c > 120.0) continue
+            val n = (s.name + " " + s.path).lowercase()
+            val sc = when {
+                n.contains("cpu") || n.contains("soc") || n.contains("core") || n.contains("big") ||
+                    n.contains("little") || n.contains("tsens") || n.contains("cluster") ||
+                    n.contains("a53") || n.contains("a55") || n.contains("goke") || n.contains("gk") -> 3
+                n.contains("gpu") || n.contains("ddr") || n.contains("battery") || n.contains("wifi") || n.contains("modem") -> 0
+                else -> 2
+            }
+            if (sc > bs) { bs = sc; best = s }
+        }
+        return best
+    }
+
+    /** Returns (celsius, source) or (-1, ""). Order: custom path, standard sensors, deep scan, dumpsys. */
+    fun pickTemp(ctx: Context): Pair<Double, String> {
+        val custom = Prefs.thermalPath(ctx)
+        if (custom.isNotEmpty()) {
+            val v = readNum(File(custom))
+            if (v != null) {
+                val c = norm(v)
+                if (c in 1.0..150.0) return Pair(c, custom)
+            }
+        }
+        pick(sensors())?.let { return Pair(it.c, it.name) }
+        pick(deepScan())?.let { return Pair(it.c, it.path) }
+        val d = dumpsys()
+        if (d != null) return Pair(d.first, "dumpsys:" + d.second)
+        return Pair(-1.0, "")
+    }
+
+    fun thermalReport(ctx: Context): String {
+        val used = pickTemp(ctx).second
+        val arr = JSONArray()
+        val all = ArrayList<Sensor>()
+        all.addAll(sensors())
+        if (all.isEmpty()) all.addAll(deepScan())
+        for (s in all.take(14)) {
+            arr.put(JSONObject().put("name", s.name).put("path", s.path).put("c", s.c).put("used", s.name == used || s.path == used))
+        }
+        val d = dumpsys()
+        if (all.isEmpty() && d != null) {
+            arr.put(JSONObject().put("name", "dumpsys:" + d.second).put("path", "dumpsys").put("c", d.first).put("used", true))
+        }
+        return JSONObject().put("list", arr).toString()
+    }
+
+    private fun loadAvg(): Double? = try {
+        val t = File("/proc/loadavg").readText().trim().split(" ")[0].toDouble()
+        (t / cores() * 100.0).coerceIn(0.0, 100.0)
+    } catch (e: Exception) { null }
+
+    private fun curFreqMHz(): Long {
+        for (p in listOf(
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
+            "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq",
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq"
+        )) {
+            val v = readLong(File(p))
+            if (v != null && v > 0) return v / 1000L
+        }
+        return 0L
     }
 
     fun stats(ctx: Context): String {
@@ -106,7 +251,16 @@ object SysInfo {
         var per = procStat()
         if (per == null) {
             per = freqLoad()
-            src = if (per != null) "frequency (estimated)" else "none"
+            src = "frequency (estimated)"
+        }
+        if (per == null) {
+            val la = loadAvg()
+            if (la != null) {
+                per = DoubleArray(cores()) { la }
+                src = "loadavg (estimated)"
+            } else {
+                src = "none"
+            }
         }
         val cpus = JSONArray()
         var avg = -1.0
@@ -114,15 +268,16 @@ object SysInfo {
             for (v in per) cpus.put(Math.round(v))
             avg = per.average()
         }
-        val f = (readLong(File("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")) ?: 0L) / 1000L
+        val t = pickTemp(ctx)
         return JSONObject()
             .put("ramTotal", total)
             .put("ramUsed", used)
             .put("cpu", Math.round(avg))
             .put("cpus", cpus)
             .put("src", src)
-            .put("temp", temp())
-            .put("freq", f)
+            .put("temp", t.first)
+            .put("tsrc", t.second)
+            .put("freq", curFreqMHz())
             .put("cores", cores())
             .put("hw", Build.HARDWARE)
             .put("model", Build.MODEL)

@@ -21,5 +21,8 @@ object Prefs {
         sp(c).edit().putString("sound_uri", uri).putString("sound_name", name).apply()
     }
 
+    fun thermalPath(c: Context): String = sp(c).getString("thermal_path", "") ?: ""
+    fun setThermalPath(c: Context, v: String) { sp(c).edit().putString("thermal_path", v.trim()).apply() }
+
     fun keyName(code: Int): String = KeyEvent.keyCodeToString(code).removePrefix("KEYCODE_")
 }

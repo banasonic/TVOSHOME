@@ -5,10 +5,13 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Base64
 import android.view.ContextThemeWrapper
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.ByteArrayInputStream
 
 /**
  * Loads kooora.com "today's matches" in a hidden WebView (so the page runs its own scripts and
@@ -39,7 +42,16 @@ class KooraJob(private val svc: KeyService, private val url: String, private val
             v.settings.domStorageEnabled = true
             v.settings.userAgentString = UA
             v.layout(0, 0, 1280, 3000)
+            v.settings.blockNetworkImage = true
             v.webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                    val h = request?.url?.host ?: return null
+                    for (b in BLOCK) {
+                        if (h.contains(b)) return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                    }
+                    return null
+                }
+
                 override fun onPageFinished(view: WebView?, u: String?) {
                     ui.postDelayed(poll, 2500)
                 }
@@ -90,6 +102,7 @@ class KooraJob(private val svc: KeyService, private val url: String, private val
     }
 
     companion object {
+        val BLOCK = listOf("doubleclick", "googlesyndication", "googletagmanager", "google-analytics", "adservice", "taboola", "outbrain", "facebook", "criteo", "adnxs", "amazon-adsystem", "scorecardresearch", "hotjar", "teads", "pubmatic", "rubiconproject")
         const val UA = "Mozilla/5.0 (Linux; Android 11; TV Box) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
     }
 }

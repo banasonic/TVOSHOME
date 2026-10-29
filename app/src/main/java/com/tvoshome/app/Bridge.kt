@@ -3,6 +3,8 @@ package com.tvoshome.app
 import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
+import android.location.Location
+import android.location.LocationManager
 import android.net.Uri
 import android.util.Base64
 import android.os.Handler
@@ -23,6 +25,21 @@ class Bridge(private val svc: KeyService) {
     @JavascriptInterface fun apps(): String = SysInfo.running(ctx).toString()
     @JavascriptInterface fun clearAll(): Int = SysInfo.killAll(ctx)
     @JavascriptInterface fun kill(pkg: String) { SysInfo.kill(ctx, pkg) }
+    @JavascriptInterface fun thermalReport(): String = SysInfo.thermalReport(ctx)
+
+    /** Last known device location as {"lat":..,"lon":..} or "" (needs the location permission, see the app screen). */
+    @JavascriptInterface fun deviceLoc(): String {
+        return try {
+            val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            var best: Location? = null
+            for (p in lm.getProviders(true)) {
+                val l = try { lm.getLastKnownLocation(p) } catch (e: SecurityException) { null }
+                if (l != null && (best == null || l.time > best.time)) best = l
+            }
+            if (best == null) "" else JSONObject().put("lat", best.latitude).put("lon", best.longitude).toString()
+        } catch (e: Exception) { "" }
+    }
+
     @JavascriptInterface fun net(): String = SysInfo.net(ctx)
     @JavascriptInterface fun bt(): Boolean = SysInfo.bt()
 
@@ -96,7 +113,7 @@ class Bridge(private val svc: KeyService) {
     private val pool = Executors.newFixedThreadPool(3)
     private val allowed = setOf(
         "api.open-meteo.com", "geocoding-api.open-meteo.com", "air-quality-api.open-meteo.com",
-        "get.geojs.io", "ipwho.is", "ipapi.co", "www.kooora.com"
+        "get.geojs.io", "ipwho.is", "ipapi.co", "api.bigdatacloud.net", "www.kooora.com"
     )
 
     /** Async HTTPS GET (no CORS limits). Result comes back through window.onHttp(id, status, base64Body). */

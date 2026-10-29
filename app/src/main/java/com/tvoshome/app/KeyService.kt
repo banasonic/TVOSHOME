@@ -11,6 +11,7 @@ import android.os.Looper
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -26,7 +27,10 @@ import androidx.webkit.WebViewAssetLoader
  * Accessibility service that
  *  1) watches the remote key you chose and reacts to a LONG press,
  *  2) hosts the overlay (a transparent WebView drawn above every app).
- * Overlay modes: hidden | full (cards, focusable) | toast (notification only, not touchable).
+ *
+ * The overlay window stays attached all the time (1x1 px and invisible while hidden) so showing it
+ * is just a layout update - much faster than creating a new window on low-RAM TV boxes.
+ * Modes: hidden | full (cards, focusable) | toast (notification only, not touchable).
  */
 class KeyService : AccessibilityService() {
 
@@ -39,10 +43,12 @@ class KeyService : AccessibilityService() {
     private var wm: WindowManager? = null
     private var root: OverlayRoot? = null
     private var web: WebView? = null
+    private var attached = false
     @Volatile var mode = "hidden"
     private var learning = false
     private var longFired = false
     private var flashEnd: Runnable? = null
+    private var kooraBusy = false
     private val longRun = Runnable {
         longFired = true
         toggle()
@@ -52,7 +58,10 @@ class KeyService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        if (root == null) buildOverlay()
+        if (root == null) {
+            buildOverlay()
+            attach()
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
@@ -60,12 +69,7 @@ class KeyService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
-        ui.post {
-            try {
-                val r = root
-                if (r != null && r.parent != null) wm?.removeView(r)
-            } catch (e: Exception) { }
-        }
+        ui.post { detach() }
         return super.onUnbind(intent)
     }
 
@@ -77,10 +81,14 @@ class KeyService : AccessibilityService() {
             .build()
         val w = WebView(themed)
         w.setBackgroundColor(Color.TRANSPARENT)
+        w.isVerticalScrollBarEnabled = false
+        w.isHorizontalScrollBarEnabled = false
+        w.overScrollMode = View.OVER_SCROLL_NEVER
         w.settings.javaScriptEnabled = true
         w.settings.domStorageEnabled = true
         w.settings.mediaPlaybackRequiresUserGesture = false
         w.settings.allowFileAccess = false
+        w.settings.setSupportZoom(false)
         w.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 val u = request?.url ?: return null
@@ -100,42 +108,49 @@ class KeyService : AccessibilityService() {
         root = r
     }
 
+    private fun attach() {
+        val r = root ?: return
+        try {
+            wm?.addView(r, params("hidden"))
+            r.visibility = View.GONE
+            attached = true
+        } catch (e: Exception) {
+            attached = false
+        }
+    }
+
+    private fun detach() {
+        try {
+            val r = root
+            if (attached && r != null) wm?.removeView(r)
+        } catch (e: Exception) { }
+        attached = false
+    }
+
     /** WebView renderer died (low RAM on TV boxes): rebuild it and restore the overlay state. */
     private fun rebuildOverlay() {
         val was = mode
-        try {
-            val r = root
-            if (r != null && r.parent != null) wm?.removeView(r)
-        } catch (e: Exception) { }
+        detach()
         try { web?.destroy() } catch (e: Exception) { }
         mode = "hidden"
         root = null
         web = null
         buildOverlay()
+        attach()
         if (was != "hidden") applyMode(was)
     }
 
-    private var kooraBusy = false
-
-    fun fetchKoora() {
-        ui.post {
-            if (!kooraBusy) {
-                kooraBusy = true
-                KooraJob(this, KOORA_URL) { kooraBusy = false }.start()
-            }
-        }
-    }
-
-    private fun params(focusable: Boolean): WindowManager.LayoutParams {
+    private fun params(m: String): WindowManager.LayoutParams {
         var flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-        if (!focusable) {
+        if (m != "full") {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
+        val size = if (m == "hidden") 1 else ViewGroup.LayoutParams.MATCH_PARENT
         val p = WindowManager.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
+            size,
+            size,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             flags,
             PixelFormat.TRANSLUCENT
@@ -158,21 +173,23 @@ class KeyService : AccessibilityService() {
         if (m == mode) return
         flashEnd?.let { ui.removeCallbacks(it) }
         flashEnd = null
-        try {
-            if (r.parent != null) manager.removeView(r)
-        } catch (e: Exception) { }
         mode = m
         web?.evaluateJavascript("window.setMode&&setMode('$m')", null)
-        if (m != "hidden") {
-            try {
-                manager.addView(r, params(m == "full"))
-                if (m == "full") {
-                    r.requestFocus()
-                    web?.requestFocus()
-                }
-            } catch (e: Exception) {
-                mode = "hidden"
+        try {
+            if (!attached) {
+                manager.addView(r, params(m))
+                attached = true
+            } else {
+                manager.updateViewLayout(r, params(m))
             }
+            r.visibility = if (m == "hidden") View.GONE else View.VISIBLE
+            if (m == "full") {
+                r.requestFocus()
+                web?.requestFocus()
+            }
+        } catch (e: Exception) {
+            mode = "hidden"
+            attached = false
         }
     }
 
@@ -188,6 +205,15 @@ class KeyService : AccessibilityService() {
                 val end = Runnable { if (mode == "toast") applyMode("hidden") }
                 flashEnd = end
                 ui.postDelayed(end, ms.toLong())
+            }
+        }
+    }
+
+    fun fetchKoora() {
+        ui.post {
+            if (!kooraBusy) {
+                kooraBusy = true
+                KooraJob(this, KOORA_URL) { kooraBusy = false }.start()
             }
         }
     }

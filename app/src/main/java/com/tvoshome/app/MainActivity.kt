@@ -1,5 +1,6 @@
 package com.tvoshome.app
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
@@ -35,6 +36,11 @@ class MainActivity : Activity() {
         col.addView(button("1. Enable the service (Accessibility)") { open(Settings.ACTION_ACCESSIBILITY_SETTINGS) })
         col.addView(button("2. Allow usage access (optional - for the apps list)") { open(Settings.ACTION_USAGE_ACCESS_SETTINGS) })
         col.addView(button("Keep alive: disable battery optimization") { open(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS) })
+        col.addView(button("Allow location (for prayer times / weather)") {
+            try {
+                requestPermissions(arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION), 7)
+            } catch (e: Exception) { }
+        })
         col.addView(button("3. Record the toggle key from your remote") {
             capturing = true
             status.text = "Press the key on your remote now...\n(BACK cancels. HOME can't be recorded by apps.)"
@@ -61,6 +67,22 @@ class MainActivity : Activity() {
         val sv = ScrollView(this)
         sv.addView(col)
         setContentView(sv)
+        applyExtras(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        applyExtras(intent)
+        refresh()
+    }
+
+    /** adb shell am start -n com.tvoshome.app/.MainActivity --es thermal_path /sys/.../temp */
+    private fun applyExtras(i: Intent?) {
+        val p = i?.getStringExtra("thermal_path")
+        if (p != null) {
+            Prefs.setThermalPath(this, p)
+            Toast.makeText(this, "Thermal file: " + (if (p.isEmpty()) "auto" else p), Toast.LENGTH_LONG).show()
+        }
     }
 
     override fun onResume() {
