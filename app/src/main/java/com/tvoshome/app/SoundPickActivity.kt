@@ -15,7 +15,7 @@ class SoundPickActivity : Activity() {
         try {
             startActivityForResult(i, 1)
         } catch (e: Exception) {
-            KeyService.instance?.setMode("full")
+            KeyService.instance?.showMode("full")
             finish()
         }
     }
@@ -41,7 +41,7 @@ class SoundPickActivity : Activity() {
             val safe = name.replace("'", " ").replace("\\", " ")
             KeyService.instance?.js("window.onSoundPicked&&onSoundPicked('$safe')")
         }
-        KeyService.instance?.setMode("full")
+        KeyService.instance?.showMode("full")
         finish()
     }
 }

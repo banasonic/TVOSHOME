@@ -148,7 +148,7 @@ class KeyService : AccessibilityService() {
         ui.post { web?.evaluateJavascript(code, null) }
     }
 
-    fun setMode(m: String) {
+    fun showMode(m: String) {
         ui.post { applyMode(m) }
     }
 
@@ -177,7 +177,7 @@ class KeyService : AccessibilityService() {
     }
 
     fun toggle() {
-        setMode(if (mode == "full") "hidden" else "full")
+        showMode(if (mode == "full") "hidden" else "full")
     }
 
     /** Show only the light notification toast for [ms] milliseconds when the overlay is hidden. */

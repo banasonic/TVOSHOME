@@ -26,7 +26,7 @@ class Bridge(private val svc: KeyService) {
     @JavascriptInterface fun net(): String = SysInfo.net(ctx)
     @JavascriptInterface fun bt(): Boolean = SysInfo.bt()
 
-    @JavascriptInterface fun hide() { svc.setMode("hidden") }
+    @JavascriptInterface fun hide() { svc.showMode("hidden") }
     @JavascriptInterface fun flash(ms: Int) { svc.flash(ms) }
 
     @JavascriptInterface fun getKey(): String {
@@ -52,13 +52,13 @@ class Bridge(private val svc: KeyService) {
                 }
                 svc.startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             } catch (e: Exception) { }
-            svc.setMode("hidden")
+            svc.showMode("hidden")
         }
     }
 
     @JavascriptInterface fun assistant() {
         ui.post {
-            svc.setMode("hidden")
+            svc.showMode("hidden")
             try {
                 svc.startActivity(Intent(Intent.ACTION_VOICE_COMMAND).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             } catch (e: Exception) {
@@ -71,7 +71,7 @@ class Bridge(private val svc: KeyService) {
 
     @JavascriptInterface fun pickSound() {
         ui.post {
-            svc.setMode("hidden")
+            svc.showMode("hidden")
             try {
                 svc.startActivity(Intent(svc, SoundPickActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             } catch (e: Exception) { }
