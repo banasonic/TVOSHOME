@@ -105,13 +105,13 @@ body[data-mode=toast] #cards,body[data-mode=toast] #bg,body[data-mode=toast] #sy
 .md .hr>div{min-width:38px;font-size:11px;gap:5px}.md .ro{height:38px;font-size:13px}.md .pr{padding:8px 10px;font-size:13px}
 .g.md,#cc.g{background:rgba(24,28,52,var(--pa,1));border:1px solid rgba(255,255,255,.2);box-shadow:0 10px 30px rgba(0,0,0,.45)}
 html:not(.lite) .g.md,html:not(.lite) #cc.g{backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px)}
-html.lite *,html.lite *::before,html.lite *::after{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;transition:none!important;animation:none!important}
+html.lite *,html.lite *::before,html.lite *::after{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 html.lite .g,html.lite .cd2:not(:focus):not(.mv){box-shadow:none!important}
 html.lite .pl,html.lite .t{background:rgba(36,42,76,.86)}
 html.lite .t:hover,html.lite .t:focus,html.lite .rb:hover,html.lite .rb:focus,html.lite .cd2:focus{background:#fff}
 html.lite .g.md,html.lite #cc.g{background:rgba(24,28,52,var(--pa,1))}
 .cd2 .l1 b{margin-left:auto}[dir=rtl] .cd2 .l1 b{margin-left:0;margin-right:auto}
-.cd2{contain:layout paint}.md{contain:layout style}html.hf .cd2{will-change:transform}
+.cd2{contain:layout paint}.md{contain:layout style}
 #wp{position:absolute;left:0;right:0;bottom:48px;display:flex;justify-content:center;z-index:70}
 #mh{display:none;position:absolute;left:50%;bottom:16px;margin-left:-150px;width:300px;text-align:center;background:#fff;color:#111;border-radius:16px;padding:8px 12px;font-size:12px;font-weight:600;z-index:90}
 body[data-mode=prompt] #cards,body[data-mode=prompt] #bg,body[data-mode=prompt] #sys,body[data-mode=prompt] #cc,body[data-mode=prompt] #wmo,body[data-mode=prompt] #sbo,body[data-mode=prompt] #mo{display:none!important}
@@ -135,6 +135,15 @@ body[data-mode=prompt] #cards,body[data-mode=prompt] #bg,body[data-mode=prompt] 
 .th2 .tl2:after{content:'';position:absolute;top:0;right:0;bottom:0;left:0;background:linear-gradient(115deg,rgba(255,255,255,.34) 0,rgba(255,255,255,.34) 36%,transparent 36%);pointer-events:none}
 .th2 .ai:focus .tl2{transform:scale(1.4);box-shadow:0 0 0 3px #ffb3e6,0 0 20px rgba(255,120,210,.8)}
 html.lite .ai:focus .tl2{box-shadow:0 0 0 3px #fff!important}
+
+:root{--ad:.1s}
+html[data-nat] *{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+.t,.t .d,.rb,.ro,.pb i,.cp .x,#bg{transition:none!important}
+.fi{animation:fi var(--ad) both}.te{animation:te var(--ad) ease-out both}
+@keyframes te{from{opacity:0}}
+.cd2{transition:transform var(--ad)}.cd2.mv{transition:none}
+.ai .tl2,.apt .tl2{transition:transform var(--ad)}
+#mtT,.opt{transition:opacity var(--ad)}
 </style></head><body><div id="st"><div id="sys"></div><div id="bg"></div><div id="cards"></div><div id="cc"></div><div id="wmo"></div><div id="sbo" class="ov"></div><div id="mo"></div><div id="wp"></div><div id="mh">Move mode · arrows move · OK drops</div><div id="ts"></div></div>
 <script src="koora.js"></script>
 <script>
@@ -161,14 +170,14 @@ storm:`<path fill="currentColor" d="M7,2v11h3v9l7,-12h-4l4,-8z"/>`};
 const ic=(n,s=24)=>`<svg viewBox="0 0 24 24" width="${s}" height="${s}">${IC[n]}</svg>`;
 
 /* ---- data taken from the app's resources ---- */
-const BG=[['Red Night','#7a1020','#2b0610','#0c0204'],['Green Night','#0f5d3a','#04261a','#010a07'],['Sunset','#ff7a45','#8e2de2','#2a0b3d'],['Ocean','#1e90ff','#00b4d8','#03132b'],['Northern Lights','#2dd4a7','#7c3aed','#04121c'],['Midnight','#1b2a6b','#0b1033','#02030a'],['Peach','#ffb199','#ff6f91','#3a1020'],['Ember','#ff5e1a','#b3120a','#1a0503'],['Galaxy','#6a3cff','#e04ec6','#080616'],['Lagoon','#18c4b8','#2563eb','#031a24'],['Neon','#ff2bd6','#00e5ff','#0a0414'],['Espresso','#8b5a3c','#3b2418','#0e0805'],['Forest','#2f7a3a','#0f3d22','#030d06'],['Gold','#f5c04a','#b07a1a','#1c1205']];
+const BG=[['Red Night','#7a1020','#2b0610','#0c0204'],['Green Night','#0f5d3a','#04261a','#010a07'],['Sunset','#ff7a45','#8e2de2','#2a0b3d'],['Ocean','#1e90ff','#00b4d8','#03132b'],['Northern Lights','#2dd4a7','#7c3aed','#04121c'],['Midnight','#1b2a6b','#0b1033','#02030a'],['Peach','#ffb199','#ff6f91','#3a1020'],['Ember','#ff5e1a','#b3120a','#1a0503'],['Galaxy','#6a3cff','#e04ec6','#080616'],['Lagoon','#18c4b8','#2563eb','#031a24'],['Neon','#ff2bd6','#00e5ff','#0a0414'],['Espresso','#8b5a3c','#3b2418','#0e0805'],['Forest','#2f7a3a','#0f3d22','#030d06'],['Gold','#f5c04a','#b07a1a','#1c1205'],['Black','#000000','#000000','#000000',1],['Charcoal','#1c1c1e','#1c1c1e','#1c1c1e',1],['Dark Gray','#3a3a3c','#3a3a3c','#3a3a3c',1],['Gray','#6e6e73','#6e6e73','#6e6e73',1],['Light Gray','#aeaeb2','#aeaeb2','#aeaeb2',1]];
 const LAY=['Two Widgets','Analogue','Float','Digital'],COL=[['Yellow','#ffd60a'],['Mint','#66e6c8'],['Blue','#0a84ff'],['Pink','#ff5c8a'],['White','#ffffff']],WID=['Analogue Clock','Modern Clock','Digital Clock','Date','Calendar','Weather'];
 const DAY=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'],MON=['January','February','March','April','May','June','July','August','September','October','November','December'];
 const WX=[['Sunny','Clear','sun'],['Mostly Sunny','Mostly Clear','sun'],['Partly Cloudy','Partly Cloudy','cloud'],['Cloudy','Cloudy','cloud'],['Foggy','Foggy','cloud'],['Drizzle','Drizzle','rain'],['Rain','Rain','rain'],['Heavy Rain','Heavy Rain','rain'],['Snow','Snow','snow'],['Sleet','Sleet','snow'],['Thunderstorms','Thunderstorms','storm']];
 /* name,country,base°C,amp,humidity,wind km/h,uv,us_aqi,codes(5 days),sunrise,sunset */
 const CITIES=[['Cairo','Egypt',28,6,40,14,8,85,[0,0,1,0,2],5.9,17.6],['London','United Kingdom',14,4,76,18,2,38,[3,6,2,6,3],7.1,17.2],['New York','United States',18,5,60,16,5,52,[2,0,1,6,3],6.8,17.9],['Tokyo','Japan',20,5,65,12,5,60,[1,2,6,3,0],5.9,16.9],['Dubai','United Arab Emirates',36,6,45,15,10,110,[0,0,0,1,0],6.2,17.5],['Sydney','Australia',22,4,62,20,6,30,[1,0,2,5,0],5.8,18.6],['Reykjavik','Iceland',3,3,80,30,1,25,[8,3,9,3,8],8.4,17.5]];
 
-const S={mod:'',ps:0,ms:0,fx:'',ret:'',back:'',tr:90,ck:'digital',dev:0,bg:5,kn:'',kc:0,kl:700,kcon:0,learn:0,ho:0,loc:null,locT:0,res:[],kbl:'en',lite:-1,pt:0,hf:1,lk:'wx',am:0,aw:1,autoSb:0,wp:0,wfo:0,sc:0,st:0,apps:[],fmt:'auto',wifi:1,bt:1,cc:0,sb:0,mic:0,wo:0,ws:0,lay:1,col:0,L:0,R:4,unit:'auto',city:0,auto:1,showLoc:1,bar:1,pill:1,load:0,msg:'',q:''};
+const S={mod:'',ps:0,ms:0,fx:'',ret:'',back:'',tr:90,ck:'digital',dev:0,bg:5,kn:'',kc:0,kl:700,kcon:0,learn:0,ho:0,loc:null,locT:0,res:[],kbl:'en',lite:-1,pt:0,hf:1,an:1,lk:'wx',am:0,aw:1,autoSb:0,wp:0,wfo:0,sc:0,st:0,apps:[],fmt:'auto',wifi:1,bt:1,cc:0,sb:0,mic:0,wo:0,ws:0,lay:1,col:0,L:0,R:4,unit:'auto',city:0,auto:1,showLoc:1,bar:1,pill:1,load:0,msg:'',q:''};
 const pad=n=>String(n).padStart(2,'0'),h24=()=>S.fmt==24;
 const tp=d=>{const h=d.getHours(),m=pad(d.getMinutes());return h24()?[h+':'+m,'']:[(h%12||12)+':'+m,h<12?'AM':'PM']};
 const T=d=>tp(d).join(' ').trim();
@@ -320,7 +329,7 @@ function rSB(){const o=$('#sbo');o.style.display=S.sb?'grid':'none';if(!S.sb){o.
 
 let wt;function wake(){const p=$('#opt');if(!p)return;p.classList.remove('h');clearTimeout(wt);wt=setTimeout(()=>p.classList.add('h'),4000)}
 function rMic(){$('#mo').innerHTML=S.mic?`<div class="ov fi" data-a="mic0" style="background:rgba(0,0,0,.55);backdrop-filter:blur(14px);display:grid;place-items:center;cursor:pointer"><div style="display:grid;justify-items:center;gap:26px"><div class="orb"></div><div class="eq">${[0,.15,.3,.1,.25,.05,.2].map(d=>`<i style="animation-delay:${d}s"></i>`).join('')}</div><div style="font-size:20px;font-weight:600">Listening…</div><div style="opacity:.6;font-size:13px">Click anywhere or press Esc to close</div></div></div>`:''}
-function rBg(){const b=BG[S.bg];document.documentElement.classList.toggle('lite',!!S.lite);document.documentElement.classList.toggle('hf',!!S.hf);document.documentElement.style.setProperty('--pa',(100-S.pt)/100);$('#bg').style.background=`radial-gradient(120% 90% at 18% 8%,${b[1]},transparent 62%),radial-gradient(110% 90% at 88% 96%,${b[2]},transparent 62%),linear-gradient(160deg,${b[3]},#000)`;$('#bg').style.opacity=(100-S.tr)/100;
+function rBg(){const b=BG[S.bg];document.documentElement.classList.toggle('lite',!!S.lite);document.documentElement.style.setProperty('--ad',['0s','.1s','.18s'][S.an|0]);document.documentElement.classList.toggle('hf',!!S.hf);document.documentElement.style.setProperty('--pa',(100-S.pt)/100);$('#bg').style.background=b[4]?b[1]:`radial-gradient(120% 90% at 18% 8%,${b[1]},transparent 62%),radial-gradient(110% 90% at 88% 96%,${b[2]},transparent 62%),linear-gradient(160deg,${b[3]},#000)`;$('#bg').style.opacity=(100-S.tr)/100;
  if(!$('#sys').firstChild)$('#sys').innerHTML=`<div style="position:absolute;top:0;right:0;bottom:0;left:0;background:linear-gradient(135deg,#1f4037,#3a6073 45%,#7b4b94)"></div><div style="position:absolute;left:0;right:0;top:48%;display:flex;gap:18px;padding:0 6%">${[['YouTube','#ff0033'],['Netflix','#e50914'],['Prime','#00a8e1'],['Kodi','#17b2e7'],['Settings','#8e8e93'],['Chrome','#4285f4']].map(a=>`<div style="flex:1;min-width:0;height:84px;border-radius:14px;background:${a[1]};display:grid;place-items:center;font-weight:600;font-size:16px">${a[0]}</div>`).join('')}</div><div style="position:absolute;left:6%;bottom:10%;font-size:13px;opacity:.7">Demo screen behind the overlay</div>`}
 function R(){R0();fixGap()}
 function R0(){LV={};const ae=document.activeElement,ds=ae&&ae.dataset||{},k=ds.a?'a':ds.p?'p':ds.m?'m':ds.s?'s':'',kv=k?ds[k]:'';
@@ -330,7 +339,7 @@ function R0(){LV={};const ae=document.activeElement,ds=ae&&ae.dataset||{},k=ds.a
  else if(kv){const e=document.querySelector(`[data-${k}=${JSON.stringify(kv)}]`);e&&e.focus({preventScroll:true})}}
 
 /* ---- storage ---- */
-const P={co:0,mth:'',asr:1,adj:0,lead:10,on:[1,1,1,1,1],snd:0,sname:''},M={sel:{},bell:{},lead:15,off:0},Q={pos:{}},PS=['sc','st','apps','am','aw','hf','lite','pt','loc','locT','kbl','kn','kc','kl','bg','tr','fmt','ck','dev','unit','city','auto','showLoc','bar','pill','lay','col','L','R'];
+const P={co:0,mth:'',asr:1,adj:0,lead:10,on:[1,1,1,1,1],snd:0,sname:''},M={sel:{},bell:{},lead:15,off:0},Q={pos:{}},PS=['an','sc','st','apps','am','aw','hf','lite','pt','loc','locT','kbl','kn','kc','kl','bg','tr','fmt','ck','dev','unit','city','auto','showLoc','bar','pill','lay','col','L','R'];
 try{const j=JSON.parse(localStorage.getItem('tvosCards')||'{}');Object.assign(P,j.P||{});Object.assign(M,j.M||{});Object.assign(Q,j.Q||{});Q.pos=Q.pos||{};Object.assign(S,j.S||{})}catch(e){}
 const sv=()=>{PC={};try{localStorage.setItem('tvosCards',JSON.stringify({P,M,Q,S:PS.reduce((o,k)=>(o[k]=S[k],o),{})}))}catch(e){}};
 const AR=(d,o)=>new Intl.DateTimeFormat('ar-u-nu-latn',o).format(d),dsh=d=>DAY[d.getDay()].slice(0,3)+' '+d.getDate()+' '+MON[d.getMonth()].slice(0,3);
@@ -364,7 +373,7 @@ function beep(k){try{if(k==3){if(NAT){NAT.playCustom();return}if(SND.url){new Au
 function toast(t,b,k){if(NAT&&MODE=='hidden')NAT.flash(9000);beep(k);const e=document.createElement('div');e.className='g tt te';e.dir='auto';e.innerHTML=`<b>${t}</b><div>${b}</div>`;e.onclick=()=>e.remove();$('#ts').appendChild(e);setTimeout(()=>e.remove(),9000);try{if(Notification.permission=='granted')new Notification(t,{body:b.replace(/<[^>]+>/g,' ')})}catch(x){}}
 const perm=()=>{try{Notification.requestPermission()}catch(e){}};
 
-const STEP={'P.co':()=>CO.map((x,i)=>[i,x[0]+' – '+x[1]]),'P.mth':()=>[['','الافتراضية للدولة ('+MD[PL()[5]][0]+')'],...Object.entries(MD).map(([k,v])=>[k,v[0]])],'P.lead':()=>[0,5,10,15,20,30].map(x=>[x,x?x+' دقيقة':'عند وقت الصلاة']),'M.lead':()=>[5,10,15,30,60].map(x=>[x,x+' دقيقة']),'S.L':()=>WID.map((x,i)=>[i,x]),'S.R':()=>WID.map((x,i)=>[i,x]),'S.st':()=>SCT.map((x,i)=>[i,x]),'S.lay':()=>STY.map((x,i)=>[i,x.n]),'S.am':()=>[[0,'Off'],[1,'1 min (test)'],[60,'1 hour'],[120,'2 hours'],[180,'3 hours'],[240,'4 hours'],[360,'6 hours'],[480,'8 hours'],[720,'12 hours']]};
+const STEP={'P.co':()=>CO.map((x,i)=>[i,x[0]+' – '+x[1]]),'P.mth':()=>[['','الافتراضية للدولة ('+MD[PL()[5]][0]+')'],...Object.entries(MD).map(([k,v])=>[k,v[0]])],'P.lead':()=>[0,5,10,15,20,30].map(x=>[x,x?x+' دقيقة':'عند وقت الصلاة']),'M.lead':()=>[5,10,15,30,60].map(x=>[x,x+' دقيقة']),'S.L':()=>WID.map((x,i)=>[i,x]),'S.R':()=>WID.map((x,i)=>[i,x]),'S.st':()=>SCT.map((x,i)=>[i,x]),'S.an':()=>[[0,'Off'],[1,'Fast'],[2,'Normal']],'S.lay':()=>STY.map((x,i)=>[i,x.n]),'S.am':()=>[[0,'Off'],[1,'1 min (test)'],[60,'1 hour'],[120,'2 hours'],[180,'3 hours'],[240,'4 hours'],[360,'6 hours'],[480,'8 hours'],[720,'12 hours']]};
 function stp(k,v){const o=STEP[k](),i=Math.max(0,o.findIndex(x=>x[0]==v));return`<div class="stp"><button class="rb" data-a="sp:${k}:-1" style="margin:0">‹</button><div class="card">${o[i][1]}</div><button class="rb" data-a="sp:${k}:1" style="margin:0">›</button></div>`}
 /* ---- football (snapshot of kooora.com "مباريات اليوم") ---- */
 const CPS={es:'الدوري الإسباني',br:'الدوري البرازيلي',fr:'الدوري الفرنسي',pt:'الدوري البرتغالي الممتاز',co:'الدوري الكولومبي',cl:'دوري تشيلي',tr:'الدوري التركي الممتاز',acl:'دوري أبطال آسيا النخبة',fr2:'الدوري الفرنسي – الدرجة الثانية',ar:'الدوري الأرجنتيني',es2:'الدوري الإسباني – الدرجة الثانية'};
@@ -393,7 +402,7 @@ const mtMs=m=>{const d=new Date();d.setHours(+m.t.slice(0,2),+m.t.slice(3),0,0);
 const chn=m=>m.ch[0]||'غير محددة';
 let cur=-1;
 function rotM(first){const e=$('#mtT');if(!e)return;const l=mlist();if(!l.length){e.innerHTML='<span class="nm">لا توجد مباريات</span>';return}
- let m;do{m=l[Math.floor(Math.random()*l.length)]}while(l.length>1&&m.id==cur);cur=m.id;
+ let m=first?l.find(x=>x.id==cur):null;if(!m){do{m=l[Math.floor(Math.random()*l.length)]}while(l.length>1&&m.id==cur)}cur=m.id;
  const fs=x=>x.length<=16?12.5:x.length<=21?11:10;
  const put=()=>{e.innerHTML=`<div style="flex:1;min-width:0"><div class="nm" style="font-size:${fs(m.h)}px">${m.h}</div><div class="nm" style="font-size:${fs(m.a)}px;opacity:.8">× ${m.a}</div></div><div style="text-align:center;flex:none"><b style="font-size:15px;font-variant-numeric:tabular-nums">${m.st||m.t}</b><div class="l2" style="font-size:10px">${m.r.replace('الجولة ','ج ')}</div></div>`;e.classList.remove('o')};
  if(first)put();else{e.classList.add('o');setTimeout(put,350)}}
@@ -461,14 +470,14 @@ function ramHTML(){const D=DEV[S.dev],u=ramUsed(),p=Math.round(u/RT()*100);
  return`<div style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div style="font-size:17px;font-weight:600">Memory</div><div id="ruT" style="opacity:.8;font-size:13px;margin-top:2px">${gb(u)} GB used of ${gb(RT())} GB · ${gb(RT()-u)} GB free</div></div><button class="ch on" data-a="clr" style="padding:11px 18px;font-size:14px">Clear all</button></div>
  <div class="pb" style="margin:12px 0 4px;height:8px"><i id="ruB" style="width:${p}%;background:${pcol(p)}"></i></div>
  <div class="sec"><div class="k">RUNNING APPS (${SM.apps.length})</div>${SM.apps.length?SM.apps.map((a,i)=>`<button class="ro" data-a="kill:${i}"><span style="width:28px;height:28px;border-radius:8px;background:${a[2]};display:grid;place-items:center;font-size:13px;font-weight:600;color:#fff;flex:none">${a[0][0]}</span><span class="sp">${a[0]}</span><small>${a[1]>0?a[1]+' MB':'—'}</small><span style="opacity:.7">✕</span></button>`).join(''):'<div class="ms" style="text-align:center;padding:16px">No apps running in the background</div>'}</div>
- <div class="ms" style="line-height:1.7">Demo data. On the box the app reads /proc/meminfo and the running-apps list; “Clear all” asks Android to close background apps. OK on an app closes it.</div>`}
+ `}
 function cpuHTML(){const D=DEV[S.dev];
  return`<div style="font-size:17px;font-weight:600">Processor</div><div style="opacity:.8;font-size:13px;margin-top:2px">${NAT&&SM.nat?`${SM.nat.model} · ${SM.nat.hw} · ${SM.nat.cores} cores`:`${D.n} · ${D.cpu} · ${D.gpu}`}</div>
  <div class="gr" style="margin-top:12px"><div class="card"><div class="k2">USAGE</div><div class="v" id="cuV">${Math.round(SM.u)}%</div><div class="n" id="cfV">${(SM.f/1000).toFixed(2)} GHz</div></div><div class="card"><div class="k2">TEMPERATURE</div><div class="v" id="ctV" style="color:${tcol()}">${SM.t>0?Math.round(SM.t)+'°C':'N/A'}</div><div class="n" id="ctN">${SM.t>=75?'Hot':SM.t>=60?'Warm':'Normal'}</div></div></div>
  <div class="sec"><div class="k">CORES</div><div class="card">${SM.c.map((v,i)=>`<div style="display:flex;align-items:center;gap:10px;margin:7px 0;font-size:12px"><span style="width:44px">Core ${i}</span><div class="pb" style="flex:1"><i id="cc${i}" style="width:${v}%;background:${pcol(v)}"></i></div><span id="cn${i}" style="width:34px;text-align:right">${Math.round(v)}%</span></div>`).join('')}</div></div>
  <div class="sec"><div class="k">LAST 60 SECONDS</div><div class="card"><svg viewBox="0 0 120 40" preserveAspectRatio="none" style="width:100%;height:40px"><polyline id="spk" fill="none" stroke="#64d2ff" stroke-width="1.5" points="${spk()}"/></svg></div></div>
- ${NAT?`<div class="sec"><div class="k">THERMAL SENSORS</div><div class="card" style="font-size:11px;line-height:1.6">${SM.sens&&SM.sens.list&&SM.sens.list.length?SM.sens.list.slice(0,10).map(x=>`<div style="display:flex;justify-content:space-between;gap:8px${x.used?';font-weight:600':''}"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.name||x.path}</span><span>${Math.round(x.c)}°C${x.used?' ✓':''}</span></div>`).join(''):'No readable temperature sensor.<br>Try: adb shell pm grant com.tvoshome.app android.permission.DUMP<br>Or point to the file: adb shell am start -n com.tvoshome.app/.MainActivity --es thermal_path /sys/…/temp'}</div></div>`:''}
- <div class="ms" style="line-height:1.7">${NAT?'Live data from this device'+(SM.nat?' (CPU source: '+SM.nat.src+')':'')+'.':'Demo data for '+D.n+'.'} On the box: usage from /proc/stat, temperature from /sys/class/thermal/thermal_zone*/temp (the CPU/SoC zone is picked automatically), frequency from cpufreq.</div>`}
+ ${NAT&&SM.t<=0?`<div class="sec"><div class="k">THERMAL SENSORS</div><div class="card" style="font-size:11px;line-height:1.6">${SM.sens&&SM.sens.list&&SM.sens.list.length?SM.sens.list.slice(0,10).map(x=>`<div style="display:flex;justify-content:space-between;gap:8px${x.used?';font-weight:600':''}"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.name||x.path}</span><span>${Math.round(x.c)}°C${x.used?' ✓':''}</span></div>`).join(''):'No readable temperature sensor.<br>Try: adb shell pm grant com.tvoshome.app android.permission.DUMP<br>Or point to the file: adb shell am start -n com.tvoshome.app/.MainActivity --es thermal_path /sys/…/temp'}</div></div>`:''}
+ `}
 function stHTML(){const ch=(a,t,on)=>`<button class="ch ${on?'on':''}" data-a="${a}">${t}</button>`;
  return`<div style="font-size:17px;font-weight:600">Settings</div>
  <div class="sec"><div class="k">CLOCK STYLE</div><div style="display:flex;gap:8px">${ch('ck:digital','Digital',S.ck=='digital')}${ch('ck:analog','Analog',S.ck=='analog')}</div><div class="ms">Analog shows a wide clock card at the top right.</div></div>
@@ -480,7 +489,7 @@ function stHTML(){const ch=(a,t,on)=>`<button class="ch ${on?'on':''}" data-a="$
  <div class="sec"><div class="k">AUTO STANDBY</div>${stp('S.am',S.am)}
  <button class="ro" data-a="aw" style="margin-top:6px"><span class="sp">Turn Wi-Fi off when it starts</span><small>${S.aw?'On':'Off'}</small></button>
  <div class="ms">Starts after the chosen time without any remote key (the timer restarts with every key press). Any key exits; then it asks whether to turn Wi-Fi back on.</div></div>
- <div class="sec"><div class="k">PERFORMANCE</div><button class="ro" data-a="lite"><span class="sp">Lite mode (no blur / animations)</span><small>${S.lite?'On':'Off'}</small></button><button class="ro" data-a="hf"><span class="sp">Smooth mode (high frame rate)</span><small>${S.hf?'On':'Off'}</small></button><div class="ms">Recommended for boxes with 1 GB RAM.</div></div>
+ <div class="sec"><div class="k">PERFORMANCE</div><button class="ro" data-a="lite"><span class="sp">Lite mode (no blur / animations)</span><small>${S.lite?'On':'Off'}</small></button><button class="ro" data-a="hf"><span class="sp">Smooth mode (high frame rate)</span><small>${S.hf?'On':'Off'}</small></button><div class="k2" style="margin:8px 4px 4px">Animations</div>${stp('S.an',S.an)}<div class="ms">Lite mode: flat colours and no shadows. Animations only move/fade (no blur).</div></div>
  <div class="sec"><div class="k">CARD CONTENT TRANSPARENCY · ${S.pt}%</div><div class="stp"><button class="rb" data-a="pt:-10" style="margin:0;font-size:22px">−</button><div class="pb" style="flex:1;height:8px"><i style="width:${S.pt}%;background:#fff"></i></div><button class="rb" data-a="pt:10" style="margin:0;font-size:22px">+</button></div><div class="ms">Transparency of the windows that open from the cards. 0% = solid (default).</div></div>
  <div class="sec"><div class="k">OVERLAY TOGGLE KEY</div>
  <button class="ro" data-a="learn"><span class="sp">${S.learn?'Press a key on your remote…':'Record key'}</span><small>${S.kn||'not set'}</small></button>
@@ -569,10 +578,13 @@ window.onLaunchApps=b=>{try{AP=JSON.parse(B64D(b))}catch(e){AP=[]}if(S.mod=='ap'
 function apHTML(){const on=p=>S.apps.some(a=>a.p==p);
  return`<div style="font-size:15px;font-weight:600">Add apps <span style="opacity:.6;font-weight:500">(${S.apps.length}/5)</span></div><div class="ms" style="margin:4px 0 8px">Select up to 5. A ✓ means it is on the bar; select it again to remove it.</div>${AP.length?`<div class="apg">${AP.map((a,i)=>`<button class="apt" data-a="sa:${i}"><span class="tl2">${icn(a)}${on(a.p)?'<i class="ck">✓</i>':''}</span><span class="lb2">${a.n}</span></button>`).join('')}</div>`:'<div class="ms" style="text-align:center;padding:24px 0">Loading apps…</div>'}`}
 /* ---- audio ("صوتية") channels ---- */
-const WNUM={one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10};
-function chNum(n){const d=n.match(/(\d+)(?!.*\d)/);if(d)return+d[1];const w=n.toLowerCase().match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b(?!.*\b(one|two|three|four|five|six|seven|eight|nine|ten)\b)/);return w?WNUM[w[1]]:0}
-function audioChips(ch){const seen={},o=[];ch.forEach(c=>{const k=chNum(c);if(k&&!seen[k]){seen[k]=1;o.push(`<span class="ch" style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.24)">${ic('mic',12)}صوتية رقم ${k}</span>`)}});return o.join('')}
-/* ---- live clock ---- */
+function audioChips(ch){const seen={},o=[],mk=t=>`<span class="ch m" style="display:inline-flex;align-items:center;gap:4px">${ic('mic',12)}${t}</span>`;
+ ch.forEach(c=>{const m=c.match(/beIN\s*Sports\s*Mena\s*(\d+)/i);if(m){const k=+m[1];if(!seen[k]){seen[k]=1;o.push(mk('صوتية رقم '+k))}}else if(/stc\s*tv/i.test(c)&&!seen.it){seen.it=1;o.push(mk('صوتية الإيطالية'))}});return o.join('')}
+/* ---- watchdog ---- */
+(function(){let lt=Date.now(),bad=0,slow=0;
+ setInterval(()=>{const n=Date.now(),d=n-lt-1000;lt=n;if(!NAT||MODE!='full')return;if(d>400)bad++;else if(bad>0)bad--;if(bad>=5){bad=0;NAT.resetWebView()}},1000);
+ setInterval(()=>{if(!NAT||MODE!='full')return;let f=0,t0=0;const step=t=>{if(!t0)t0=t;if(++f<16){requestAnimationFrame(step);return}if((t-t0)/15>110){if(++slow>=3){slow=0;NAT.resetWebView()}}else slow=0};requestAnimationFrame(step)},20000)})();
+/* ---- live clock ---- *//* ---- live clock ---- */
 function tick(){const n=new Date(),[a,b]=tp(n);
  document.querySelectorAll('[data-t]').forEach(e=>{const v=e.closest('.pl,#cc')?T(n):a;e.textContent=e.hasAttribute('data-ar')?arD(v):v});
  document.querySelectorAll('[data-ap]').forEach(e=>e.textContent=e.hasAttribute('data-ar')?(n.getHours()<12?'ص':'م'):b);document.querySelectorAll('[data-d]').forEach(e=>e.textContent=dstr(n));document.querySelectorAll('[data-ds]').forEach(e=>e.textContent=dsh(n));
@@ -583,7 +595,7 @@ function tick(){const n=new Date(),[a,b]=tp(n);
  document.querySelectorAll('.ah').forEach(e=>e.setAttribute('transform',`rotate(${h*30} 100 100)`));document.querySelectorAll('.am').forEach(e=>e.setAttribute('transform',`rotate(${m*6} 100 100)`));document.querySelectorAll('.as').forEach(e=>e.setAttribute('transform',`rotate(${s*6} 100 100)`))}
 function tickLoop(){if(!(NAT&&MODE=='hidden'))tick();setTimeout(tickLoop,document.querySelector('.as')?1000:60080-Date.now()%60000)}
 let lastN=0,sc=0;setInterval(()=>{const vs=!(NAT&&MODE=='hidden');fire();if(!vs)return;const nx=nextPr(),c=cdS(nx.ms-Date.now());if(lastN&&lastN!=nx.ms){lastN=nx.ms;rBar()}lastN=nx.ms;const e=$('#prC');if(e)e.textContent=c;const e2=$('#prC2');if(e2)e2.textContent=c;if(++sc%((S.mod=='cpu'||S.mod=='ram')?2:4)==0)simTick(0)},1000);
-setInterval(()=>{if(!dg&&!S.mod&&!S.sb&&!(NAT&&MODE=='hidden'))rotM(0)},10000);
+setInterval(()=>{if(!dg&&!S.mod&&!S.sb&&!(NAT&&MODE=='hidden'))rotM(0)},30000);
 
 /* ---- move cards (long-press / hold OK) ---- */
 let dg=null,ent=null,lp=null,noClick=0,kt=0,mvUp=true;

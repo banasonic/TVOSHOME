@@ -95,6 +95,8 @@ class Bridge(private val svc: KeyService) {
         }
     }
 
+    @JavascriptInterface fun resetWebView() { svc.rebuild() }
+
     @JavascriptInterface fun showKeyboard() { svc.showKeyboard() }
     @JavascriptInterface fun hideKeyboard() { svc.hideKeyboard() }
     @JavascriptInterface fun setHighFps(b: Boolean) {

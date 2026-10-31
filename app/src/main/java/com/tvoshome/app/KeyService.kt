@@ -53,6 +53,29 @@ class KeyService : AccessibilityService() {
     private var longFired = false
     private var flashEnd: Runnable? = null
     private var kooraBusy = false
+    private var shownAt = 0L
+    private val freshRun = Runnable { if (mode == "hidden") rebuildOverlay() }
+    private var beatAt = SystemClock.elapsedRealtime()
+    private var beatBad = 0
+
+    /** Main-thread watchdog: if the overlay is visible and the UI thread keeps stalling, restart the WebView. */
+    private val beat = object : Runnable {
+        override fun run() {
+            val now = SystemClock.elapsedRealtime()
+            val drift = now - beatAt - 2000L
+            beatAt = now
+            if (mode == "full") {
+                if (drift > 700L) beatBad++ else if (beatBad > 0) beatBad--
+                if (beatBad >= 4) {
+                    beatBad = 0
+                    rebuildOverlay()
+                }
+            } else {
+                beatBad = 0
+            }
+            ui.postDelayed(this, 2000L)
+        }
+    }
     private var lastInput = SystemClock.elapsedRealtime()
     private var standbyAt = 0L
     private var homePkgs: Set<String>? = null
@@ -78,6 +101,9 @@ class KeyService : AccessibilityService() {
         }
         ui.removeCallbacks(idleCheck)
         ui.postDelayed(idleCheck, 30000L)
+        beatAt = SystemClock.elapsedRealtime()
+        ui.removeCallbacks(beat)
+        ui.postDelayed(beat, 2000L)
     }
 
     /** HOME pressed while StandBy / prompt is showing -> leave it (HOME never reaches onKeyEvent). */
@@ -95,6 +121,8 @@ class KeyService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
         ui.removeCallbacks(idleCheck)
+        ui.removeCallbacks(beat)
+        ui.removeCallbacks(freshRun)
         ui.post { detach() }
         return super.onUnbind(intent)
     }
@@ -120,6 +148,10 @@ class KeyService : AccessibilityService() {
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 val u = request?.url ?: return null
                 return loader.shouldInterceptRequest(u)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                view?.evaluateJavascript("window.setMode&&setMode('$mode')", null)
             }
 
             override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
@@ -165,6 +197,11 @@ class KeyService : AccessibilityService() {
         buildOverlay()
         attach()
         if (was != "hidden") applyMode(was)
+    }
+
+    @Suppress("DEPRECATION")
+    fun rebuild() {
+        ui.post { rebuildOverlay() }
     }
 
     @Suppress("DEPRECATION")
@@ -238,7 +275,12 @@ class KeyService : AccessibilityService() {
         if (m != "prompt") ui.removeCallbacks(promptRun)
         flashEnd?.let { ui.removeCallbacks(it) }
         flashEnd = null
+        val prev = mode
         mode = m
+        ui.removeCallbacks(freshRun)
+        if (m == "full" && prev != "full") shownAt = SystemClock.elapsedRealtime()
+        // after a long session start a fresh WebView in the background so the next opening is always snappy
+        if (m == "hidden" && prev != "hidden" && SystemClock.elapsedRealtime() - shownAt > 180000L) ui.postDelayed(freshRun, 15000L)
         web?.evaluateJavascript("window.setMode&&setMode('$m')", null)
         try {
             if (!attached) {
