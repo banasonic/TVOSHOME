@@ -9,6 +9,7 @@ import android.net.Uri
 import android.util.Base64
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.webkit.JavascriptInterface
 import org.json.JSONObject
@@ -21,11 +22,87 @@ class Bridge(private val svc: KeyService) {
     private val ctx: Context get() = svc.applicationContext
     private val ui = Handler(Looper.getMainLooper())
 
-    @JavascriptInterface fun stats(): String = SysInfo.stats(ctx)
-    @JavascriptInterface fun apps(): String = SysInfo.running(ctx).toString()
-    @JavascriptInterface fun clearAll(): Int = SysInfo.killAll(ctx)
+    private val work = Executors.newSingleThreadExecutor()
+    @Volatile private var lastStats = "{}"
+    @Volatile private var lastAt = 0L
+    @Volatile private var statBusy = false
+
+    private fun b64(t: String): String = Base64.encodeToString(t.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+    /** Returns the last measurement immediately and refreshes it in the background (never blocks the page). */
+    @JavascriptInterface fun stats(): String {
+        val now = SystemClock.elapsedRealtime()
+        if (!statBusy && now - lastAt > 2500L) {
+            statBusy = true
+            work.execute {
+                try {
+                    lastStats = SysInfo.stats(ctx)
+                    lastAt = SystemClock.elapsedRealtime()
+                } catch (e: Exception) {
+                } finally {
+                    statBusy = false
+                }
+            }
+        }
+        return lastStats
+    }
+
+    @JavascriptInterface fun fetchApps() {
+        work.execute {
+            val j = try { SysInfo.running(ctx).toString() } catch (e: Exception) { "[]" }
+            svc.js("window.onApps&&onApps('" + b64(j) + "')")
+        }
+    }
+
+    @JavascriptInterface fun fetchThermal() {
+        work.execute {
+            val j = try { SysInfo.thermalReport(ctx) } catch (e: Exception) { "{}" }
+            svc.js("window.onThermal&&onThermal('" + b64(j) + "')")
+        }
+    }
+
+    @JavascriptInterface fun clearAll() {
+        work.execute {
+            try { SysInfo.killAll(ctx) } catch (e: Exception) { }
+        }
+    }
+
+    @JavascriptInterface fun setAuto(minutes: Int, wifiOff: Boolean) {
+        Prefs.setAutoMin(ctx, minutes)
+        Prefs.setAutoWifi(ctx, wifiOff)
+    }
+    @JavascriptInterface fun standbyExit() { svc.exitStandby() }
+    @JavascriptInterface fun wifiOn() { svc.wifiOn() }
+
+    @JavascriptInterface fun fetchLaunchApps() {
+        work.execute {
+            val j = try { SysInfo.launchables(ctx).toString() } catch (e: Exception) { "[]" }
+            svc.js("window.onLaunchApps&&onLaunchApps('" + b64(j) + "')")
+        }
+    }
+
+    @JavascriptInterface fun launchApp(pkg: String) {
+        ui.post {
+            try {
+                val pm = ctx.packageManager
+                val i = pm.getLeanbackLaunchIntentForPackage(pkg) ?: pm.getLaunchIntentForPackage(pkg)
+                if (i != null) {
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    svc.startActivity(i)
+                }
+            } catch (e: Exception) { }
+            svc.showMode("hidden")
+        }
+    }
+
+    @JavascriptInterface fun showKeyboard() { svc.showKeyboard() }
+    @JavascriptInterface fun hideKeyboard() { svc.hideKeyboard() }
+    @JavascriptInterface fun setHighFps(b: Boolean) {
+        Prefs.setHighFps(ctx, b)
+        svc.refreshWindowParams()
+    }
+
     @JavascriptInterface fun kill(pkg: String) { SysInfo.kill(ctx, pkg) }
-    @JavascriptInterface fun thermalReport(): String = SysInfo.thermalReport(ctx)
 
     /** Last known device location as {"lat":..,"lon":..} or "" (needs the location permission, see the app screen). */
     @JavascriptInterface fun deviceLoc(): String {

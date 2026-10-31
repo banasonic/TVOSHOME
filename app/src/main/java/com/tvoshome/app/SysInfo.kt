@@ -153,7 +153,7 @@ object SysInfo {
     /** Needs: adb shell pm grant com.tvoshome.app android.permission.DUMP  (reads Android's thermal service). */
     private fun dumpsys(): Pair<Double, String>? {
         val now = System.currentTimeMillis()
-        if (now - dumpAt < 15000L) return dumpVal
+        if (now - dumpAt < (if (dumpVal == null) 300000L else 20000L)) return dumpVal
         dumpAt = now
         dumpVal = null
         try {
@@ -192,7 +192,20 @@ object SysInfo {
     }
 
     /** Returns (celsius, source) or (-1, ""). Order: custom path, standard sensors, deep scan, dumpsys. */
+    private var tempAt = 0L
+    private var tempVal: Pair<Double, String>? = null
+
     fun pickTemp(ctx: Context): Pair<Double, String> {
+        val now = System.currentTimeMillis()
+        val c = tempVal
+        if (c != null && now - tempAt < 8000L) return c
+        val r = pickTemp0(ctx)
+        tempVal = r
+        tempAt = now
+        return r
+    }
+
+    private fun pickTemp0(ctx: Context): Pair<Double, String> {
         val custom = Prefs.thermalPath(ctx)
         if (custom.isNotEmpty()) {
             val v = readNum(File(custom))
@@ -330,6 +343,27 @@ object SysInfo {
             val label = try { pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString() } catch (e: Exception) { pkg }
             arr.put(JSONObject().put("name", label).put("pkg", pkg).put("mb", mb))
             if (arr.length() >= 25) break
+        }
+        return arr
+    }
+
+    /** All apps that can be launched (TV launcher + normal launcher), sorted by name. */
+    fun launchables(ctx: Context): JSONArray {
+        val pm = ctx.packageManager
+        val map = LinkedHashMap<String, String>()
+        for (cat in listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)) {
+            val i = Intent(Intent.ACTION_MAIN).addCategory(cat)
+            try {
+                for (ri in pm.queryIntentActivities(i, 0)) {
+                    val p = ri.activityInfo.packageName
+                    if (p == ctx.packageName || map.containsKey(p)) continue
+                    map[p] = ri.loadLabel(pm).toString()
+                }
+            } catch (e: Exception) { }
+        }
+        val arr = JSONArray()
+        for (e in map.entries.sortedBy { it.value.lowercase() }) {
+            arr.put(JSONObject().put("n", e.value).put("p", e.key))
         }
         return arr
     }

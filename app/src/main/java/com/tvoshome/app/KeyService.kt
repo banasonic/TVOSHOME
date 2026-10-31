@@ -6,8 +6,11 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.media.AudioManager
+import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.KeyEvent
@@ -15,6 +18,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.inputmethod.InputMethodManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -49,6 +53,16 @@ class KeyService : AccessibilityService() {
     private var longFired = false
     private var flashEnd: Runnable? = null
     private var kooraBusy = false
+    private var lastInput = SystemClock.elapsedRealtime()
+    private var standbyAt = 0L
+    private var homePkgs: Set<String>? = null
+    private val promptRun = Runnable { if (mode == "prompt") applyMode("hidden") }
+    private val idleCheck = object : Runnable {
+        override fun run() {
+            checkIdle()
+            ui.postDelayed(this, 30000L)
+        }
+    }
     private val longRun = Runnable {
         longFired = true
         toggle()
@@ -62,13 +76,25 @@ class KeyService : AccessibilityService() {
             buildOverlay()
             attach()
         }
+        ui.removeCallbacks(idleCheck)
+        ui.postDelayed(idleCheck, 30000L)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    /** HOME pressed while StandBy / prompt is showing -> leave it (HOME never reaches onKeyEvent). */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        if (mode != "standby" && mode != "prompt") return
+        if (SystemClock.elapsedRealtime() - standbyAt < 2500L) return
+        val pkg = event.packageName?.toString() ?: return
+        if (homePackages().contains(pkg)) {
+            if (mode == "standby") exitStandby() else showMode("hidden")
+        }
+    }
     override fun onInterrupt() {}
 
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
+        ui.removeCallbacks(idleCheck)
         ui.post { detach() }
         return super.onUnbind(intent)
     }
@@ -78,6 +104,7 @@ class KeyService : AccessibilityService() {
         val themed = ContextThemeWrapper(applicationContext, R.style.AppTheme)
         val loader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .addPathHandler("/appicon/", AppIconHandler(applicationContext))
             .build()
         val w = WebView(themed)
         w.setBackgroundColor(Color.TRANSPARENT)
@@ -140,10 +167,11 @@ class KeyService : AccessibilityService() {
         if (was != "hidden") applyMode(was)
     }
 
+    @Suppress("DEPRECATION")
     private fun params(m: String): WindowManager.LayoutParams {
         var flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-        if (m != "full") {
+        if (m != "full" && m != "standby" && m != "prompt") {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
@@ -156,7 +184,43 @@ class KeyService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         )
         p.gravity = Gravity.TOP or Gravity.START
+        if (m == "full") p.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+        if (Prefs.highFps(this)) {
+            try {
+                val rate = wm?.defaultDisplay?.refreshRate ?: 0f
+                if (rate > 0f) p.preferredRefreshRate = rate
+            } catch (e: Exception) { }
+        }
         return p
+    }
+
+    /** Opens the device's own on-screen keyboard for the focused page field. */
+    fun showKeyboard() {
+        ui.post {
+            try {
+                web?.requestFocus()
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.showSoftInput(web, InputMethodManager.SHOW_FORCED)
+            } catch (e: Exception) { }
+        }
+    }
+
+    fun hideKeyboard() {
+        ui.post {
+            try {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.hideSoftInputFromWindow(web?.windowToken, 0)
+            } catch (e: Exception) { }
+        }
+    }
+
+    fun refreshWindowParams() {
+        ui.post {
+            try {
+                val r = root
+                if (attached && r != null) wm?.updateViewLayout(r, params(mode))
+            } catch (e: Exception) { }
+        }
     }
 
     fun js(code: String) {
@@ -171,6 +235,7 @@ class KeyService : AccessibilityService() {
         val r = root ?: return
         val manager = wm ?: return
         if (m == mode) return
+        if (m != "prompt") ui.removeCallbacks(promptRun)
         flashEnd?.let { ui.removeCallbacks(it) }
         flashEnd = null
         mode = m
@@ -183,7 +248,7 @@ class KeyService : AccessibilityService() {
                 manager.updateViewLayout(r, params(m))
             }
             r.visibility = if (m == "hidden") View.GONE else View.VISIBLE
-            if (m == "full") {
+            if (m == "full" || m == "standby" || m == "prompt") {
                 r.requestFocus()
                 web?.requestFocus()
             }
@@ -194,7 +259,93 @@ class KeyService : AccessibilityService() {
     }
 
     fun toggle() {
-        showMode(if (mode == "full") "hidden" else "full")
+        when (mode) {
+            "standby" -> exitStandby()
+            "full", "prompt" -> showMode("hidden")
+            else -> showMode("full")
+        }
+    }
+
+    private fun homePackages(): Set<String> {
+        val c = homePkgs
+        if (c != null) return c
+        val r: Set<String> = try {
+            packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)
+                .map { it.activityInfo.packageName }.toSet()
+        } catch (e: Exception) { emptySet() }
+        homePkgs = r
+        return r
+    }
+
+    /** Auto StandBy: runs every 30 s; idle time is measured from the last remote key press (any key, any app). */
+    private fun checkIdle() {
+        val min = Prefs.autoMin(this)
+        if (min <= 0 || mode == "standby" || mode == "prompt") return
+        if (SystemClock.elapsedRealtime() - lastInput >= min * 60000L) enterStandby()
+    }
+
+    fun enterStandby() {
+        standbyAt = SystemClock.elapsedRealtime()
+        pauseMedia()
+        if (Prefs.autoWifi(this)) Thread { wifiOff() }.start()
+        applyMode("standby")
+    }
+
+    /** Any key / HOME / BACK leaves StandBy; if we switched Wi-Fi off, ask whether to turn it back on. */
+    fun exitStandby() {
+        ui.post {
+            if (mode == "standby") {
+                lastInput = SystemClock.elapsedRealtime()
+                if (Prefs.wifiOffByUs(this)) {
+                    applyMode("prompt")
+                    ui.removeCallbacks(promptRun)
+                    ui.postDelayed(promptRun, 30000L)
+                } else {
+                    applyMode("hidden")
+                }
+            }
+        }
+    }
+
+    fun wifiOn() {
+        Thread {
+            setWifi(true)
+            Prefs.setWifiOffByUs(this, false)
+        }.start()
+        showMode("hidden")
+    }
+
+    /** Works on Android 9, and on 10-14 because the app targets API 28; falls back to root (`su`) if present. */
+    @Suppress("DEPRECATION")
+    private fun setWifi(on: Boolean): Boolean {
+        var ok = false
+        try {
+            val w = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            ok = w.setWifiEnabled(on)
+        } catch (e: Exception) { }
+        if (!ok) {
+            try {
+                val p = Runtime.getRuntime().exec(arrayOf("su", "-c", if (on) "svc wifi enable" else "svc wifi disable"))
+                ok = p.waitFor() == 0
+            } catch (e: Exception) { }
+        }
+        return ok
+    }
+
+    @Suppress("DEPRECATION")
+    private fun wifiOff() {
+        val was = try {
+            (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).isWifiEnabled
+        } catch (e: Exception) { false }
+        if (was && setWifi(false)) Prefs.setWifiOffByUs(this, true)
+    }
+
+    private fun pauseMedia() {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE))
+        } catch (e: Exception) { }
     }
 
     /** Show only the light notification toast for [ms] milliseconds when the overlay is hidden. */
@@ -242,6 +393,7 @@ class KeyService : AccessibilityService() {
     }
 
     override fun onKeyEvent(e: KeyEvent): Boolean {
+        if (e.action == KeyEvent.ACTION_DOWN) lastInput = SystemClock.elapsedRealtime()
         if (learning) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {
                 learning = false

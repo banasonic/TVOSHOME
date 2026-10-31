@@ -10,7 +10,7 @@ android {
     defaultConfig {
         applicationId = "com.tvoshome.app"
         minSdk = 28
-        targetSdk = 34
+        targetSdk = 28
         versionCode = 1
         versionName = "1.0"
     }
