@@ -1,6 +1,6 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>TVOSHOME</title>
+<title>AppleMe</title>
 <style>
 @font-face{font-family:I;font-weight:400;src:url(fonts/R.ttf)}
 @font-face{font-family:I;font-weight:600;src:url(fonts/S.ttf)}
@@ -145,7 +145,6 @@ html[data-nat] *{-webkit-backdrop-filter:none!important;backdrop-filter:none!imp
 .ai .tl2,.apt .tl2{transition:transform var(--ad)}
 #mtT,.opt{transition:opacity var(--ad)}
 </style></head><body><div id="st"><div id="sys"></div><div id="bg"></div><div id="cards"></div><div id="cc"></div><div id="wmo"></div><div id="sbo" class="ov"></div><div id="mo"></div><div id="wp"></div><div id="mh">Move mode · arrows move · OK drops</div><div id="ts"></div></div>
-<script src="koora.js"></script>
 <script>
 const $=s=>document.querySelector(s),NAT=window.Native||null;
 const SK='fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"';
@@ -446,7 +445,7 @@ function fire(){const now=Date.now();
  [0,1].forEach(sh=>{const d=pday(sh);PI.forEach((i,j)=>{if(P.on[j]!==1)return;const t=d[i]-P.lead*6e4,k='p'+d[i];if(now>=t&&now<t+8e3&&!F[k]){F[k]=1;toast(P.lead?`صلاة ${PN[i]} بعد ${P.lead} دقيقة`:`حان الآن موعد صلاة ${PN[i]}`,`الموعد ${fz(d[i])} – ${PL()[1]}`,P.snd)}})});
  MT.forEach(m=>{if(!M.bell[m.id]||m.st)return;const ms=mtMs(m),t=ms-M.lead*6e4,k='m'+m.id;if(now>=t&&now<t+8e3&&!F[k]){F[k]=1;mToast(m)}})}
 const F={};
-const mToast=m=>toast(`⚽ ${m.h} × ${m.a}`,`${m.t} · ${AR(new Date(),{weekday:'long',day:'numeric',month:'long'})}<br>القناة الناقلة: ${chn(m)}`,1);
+const mToast=m=>{const w=m.ch.slice(0,6).concat(audioList(m.ch));toast(`⚽ ${m.h} × ${m.a}`,`${m.t} · ${AR(new Date(),{weekday:'long',day:'numeric',month:'long'})}<br>شاهد على: ${w.length?w.join(' · '):'غير محددة'}`,1)};
 
 /* ---- device simulation (RAM / CPU) ---- */
 const DEV=[{n:'Goke GK6323',cpu:'4× Cortex-A53',gpu:'Mali-450',ram:2048,f:[600,1400],t0:44,tk:.34},{n:'Amlogic S905X3',cpu:'4× Cortex-A55',gpu:'Mali-G31 MP2',ram:4096,f:[500,1900],t0:42,tk:.3},{n:'Amlogic S905X5',cpu:'4× Cortex-A55',gpu:'Mali-G310',ram:4096,f:[500,2000],t0:40,tk:.28},{n:'Other Android TV box',cpu:'4× Cortex-A53/A55',gpu:'Mali',ram:2048,f:[600,1800],t0:45,tk:.32}];
@@ -530,15 +529,16 @@ async function ipLoc(){const T=[['https://get.geojs.io/v1/ip/geo.json',j=>({name
 async function devLoc(){if(!NAT||!NAT.deviceLoc)return null;try{const j=JSON.parse(NAT.deviceLoc());if(!j||j.lat==null)return null;let name='',country='',cc='';
  try{const r=await GJ('https://api.bigdatacloud.net/data/reverse-geocode-client?latitude='+j.lat+'&longitude='+j.lon+'&localityLanguage=en');name=r.city||r.locality||r.principalSubdivision||'';country=r.countryName||'';cc=r.countryCode||''}catch(e){}
  return{name:name||'My location',country,cc,lat:j.lat,lon:j.lon,tz:''}}catch(e){return null}}
+function softRefresh(){rBar();if(S.mod)rWx()}
 async function loadWx(force){if(WL)return;let L=S.loc;
  if(S.auto&&(!L||force||Date.now()-(S.locT||0)>216e5)){WL=1;S.load=1;rWx();const r=(await devLoc())||(await ipLoc());WL=0;if(r){L=S.loc=r;S.locT=Date.now();sv()}}
- if(!L){S.load=0;R();return}
+ if(!L){S.load=0;softRefresh();return}
  WL=1;S.load=1;rWx();
  try{const q='latitude='+L.lat+'&longitude='+L.lon,
   [f,a]=await Promise.all([GJ('https://api.open-meteo.com/v1/forecast?'+q+'&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m&hourly=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max,precipitation_probability_max&timezone=auto&forecast_days=6&wind_speed_unit=kmh'),GJ('https://air-quality-api.open-meteo.com/v1/air-quality?'+q+'&current=us_aqi').catch(()=>null)]);
   WD=parseWx(f,a,L);WD.ts=Date.now();if(S.loc&&!S.loc.tz){S.loc.tz=WD.tz;sv()}try{localStorage.setItem('tvosWx',JSON.stringify(WD))}catch(e){}
  }catch(e){}
- WL=0;S.load=0;R()}
+ WL=0;S.load=0;softRefresh()}
 async function findCity(){const q=S.q.trim();if(!q)return;S.msg='Searching…';S.res=[];rWx();
  try{const j=await GJ('https://geocoding-api.open-meteo.com/v1/search?count=8&format=json&language='+(/[\u0600-\u06FF]/.test(q)?'ar':'en')+'&name='+encodeURIComponent(q));
   S.res=(j.results||[]).map(x=>({name:x.name,country:x.country||'',admin:x.admin1||'',lat:x.latitude,lon:x.longitude,tz:x.timezone||'',cc:x.country_code||''}));S.msg=S.res.length?'':`Couldn’t find ${q}. Check the spelling or try a nearby city.`}
@@ -553,10 +553,9 @@ const POP=/^(الدوري الإسباني|الدوري الإنجليزي ال�
 function applyOff(){MT.forEach(m=>{if(!m.t0){m.t=m.t0||'';return}const p=m.t0.split(':'),mins=(((+p[0]*60+ +p[1]+(M.off||0)*60)%1440)+1440)%1440;m.t=pad(Math.floor(mins/60))+':'+pad(mins%60)})}
 function setMT(list,live){MT=list;CP={};MT.forEach(m=>{CP[m.c]=m.c;m.t0=m.t});Object.keys(CP).forEach(k=>{if(M.sel[k]===undefined)M.sel[k]=POP.test(k)?1:0});MS.live=live;applyOff();cur=-1;sv()}
 function loadMatches(force){if(MS.busy)return;if(!force&&MS.ts&&MS.day==new Date().getDate()&&Date.now()-MS.ts<9e5)return;
- if(NAT){MS.busy=1;if(S.mod=='mt')rWx();NAT.fetchKoora()}}
+ if(NAT&&NAT.refreshMatches&&NAT.refreshMatches(!!force)){MS.busy=1;if(S.mod=='mt')rWx()}}
 function gotMT(l){if(l.length){setMT(l,1);MS.ts=Date.now();MS.day=new Date().getDate();MS.err='';return 1}return 0}
-window.onKoora=(ok,b)=>{MS.busy=0;if(ok){try{const j=JSON.parse(B64D(b));if(gotMT((j.m||[]).filter(m=>m.c&&m.h&&m.a))){R();return}}catch(e){}}
- if(typeof kooraExtract=='function')GET(KURL).then(h=>{if(!gotMT((kooraExtract(new DOMParser().parseFromString(h,'text/html')).m||[]).filter(m=>m.c&&m.h&&m.a)))MS.err='parse'}).catch(()=>{MS.err='net'}).then(()=>R());else R()};
+window.onKoora=(ok,b)=>{MS.busy=0;if(ok){try{const j=JSON.parse(B64D(b));if(gotMT((j.m||[]).filter(m=>m.c&&m.h&&m.a))){softRefresh();return}}catch(e){}}MS.err='net';softRefresh()};
 document.addEventListener('input',e=>{if(e.target.id=='q')S.q=e.target.value});
 document.addEventListener('focusout',e=>{if(e.target.id=='q')e.target.dataset.ed=''});
 
@@ -578,8 +577,8 @@ window.onLaunchApps=b=>{try{AP=JSON.parse(B64D(b))}catch(e){AP=[]}if(S.mod=='ap'
 function apHTML(){const on=p=>S.apps.some(a=>a.p==p);
  return`<div style="font-size:15px;font-weight:600">Add apps <span style="opacity:.6;font-weight:500">(${S.apps.length}/5)</span></div><div class="ms" style="margin:4px 0 8px">Select up to 5. A ✓ means it is on the bar; select it again to remove it.</div>${AP.length?`<div class="apg">${AP.map((a,i)=>`<button class="apt" data-a="sa:${i}"><span class="tl2">${icn(a)}${on(a.p)?'<i class="ck">✓</i>':''}</span><span class="lb2">${a.n}</span></button>`).join('')}</div>`:'<div class="ms" style="text-align:center;padding:24px 0">Loading apps…</div>'}`}
 /* ---- audio ("صوتية") channels ---- */
-function audioChips(ch){const seen={},o=[],mk=t=>`<span class="ch m" style="display:inline-flex;align-items:center;gap:4px">${ic('mic',12)}${t}</span>`;
- ch.forEach(c=>{const m=c.match(/beIN\s*Sports\s*Mena\s*(\d+)/i);if(m){const k=+m[1];if(!seen[k]){seen[k]=1;o.push(mk('صوتية رقم '+k))}}else if(/stc\s*tv/i.test(c)&&!seen.it){seen.it=1;o.push(mk('صوتية الإيطالية'))}});return o.join('')}
+function audioList(ch){const seen={},o=[];ch.forEach(c=>{const m=c.match(/beIN\s*Sports\s*Mena\s*(\d+)/i);if(m){const k=+m[1];if(!seen[k]){seen[k]=1;o.push('صوتية رقم '+k)}}else if(/stc\s*tv/i.test(c)&&!seen.it){seen.it=1;o.push('صوتية الإيطالية')}});return o}
+function audioChips(ch){return audioList(ch).map(t=>`<span class="ch m" style="display:inline-flex;align-items:center;gap:4px">${ic('mic',12)}${t}</span>`).join('')}
 /* ---- watchdog ---- */
 (function(){let lt=Date.now(),bad=0,slow=0;
  setInterval(()=>{const n=Date.now(),d=n-lt-1000;lt=n;if(!NAT||MODE!='full')return;if(d>400)bad++;else if(bad>0)bad--;if(bad>=5){bad=0;NAT.resetWebView()}},1000);
@@ -672,14 +671,15 @@ window.setMode=m=>{if(dg)endMove();MODE=m;document.body.dataset.mode=m;
  if(m=='standby'){S.autoSb=1;S.sb=1;S.mod='';S.cc=0;S.wp=0;R();return}
  if(m=='prompt'){S.autoSb=0;S.sb=0;S.wp=1;R();const b=document.querySelector('#wp button');if(b)b.focus();return}
  if(S.autoSb||S.wp){S.autoSb=0;S.sb=0;S.wp=0;R()}
- if(m=='full'){tick();if(NAT)simTick(0);loadMatches();if(WD&&Date.now()-WD.ts>18e5)loadWx();const e=document.querySelector('#cards .cd2');e&&e.focus()}};
+ if(m=='full'){tick();if(NAT)simTick(0);setTimeout(()=>{if(MODE=='full'){loadMatches();if(WD&&Date.now()-WD.ts>18e5)loadWx()}},6000);const e=document.querySelector('#cards .cd2');e&&e.focus()}};
 window.onBack=()=>{if(S.autoSb){wakeSb();return true}if(S.wp){if(NAT)NAT.hide();else window.setMode('full');return true}if(dg){endMove();return true}return closeTop()};
 window.onKeyLearned=(n,c)=>{S.kn=n;S.kc=c;S.learn=0;sv();R()};
 window.onSoundPicked=n=>{P.sname=n;P.snd=3;sv();R()};
 if(NAT){document.documentElement.dataset.nat=1;try{const k=JSON.parse(NAT.getKey());S.kn=k.name;S.kc=k.code;S.kl=k.longMs;S.kcon=k.consume?1:0;P.sname=NAT.soundName()||P.sname}catch(e){}}
 setMT(MT0.map(m=>Object.assign({},m,{c:CPS[m.c]})),0);
-initSim();if(NAT)simTick(0);if(S.lite<0)S.lite=NAT?1:0;if(NAT){NAT.setHighFps(!!S.hf);NAT.setAuto(S.am,!!S.aw)}let LAST=Date.now();['keydown','pointermove','pointerdown'].forEach(k=>document.addEventListener(k,()=>{LAST=Date.now()},true));
+initSim();if(NAT)simTick(0);if(NAT){try{const c=JSON.parse(NAT.matchesCache()||'null'),d=new Date(),ds=d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());if(c&&c.day==ds&&gotMT((c.m||[]).filter(m=>m.c&&m.h&&m.a)))MS.ts=c.ts||Date.now()}catch(e){}}
+if(S.lite<0)S.lite=NAT?1:0;if(NAT){NAT.setHighFps(!!S.hf);NAT.setAuto(S.am,!!S.aw)}let LAST=Date.now();['keydown','pointermove','pointerdown'].forEach(k=>document.addEventListener(k,()=>{LAST=Date.now()},true));
 setInterval(()=>{if(!NAT&&S.am>0&&!S.autoSb&&!S.wp&&Date.now()-LAST>S.am*6e4){if(S.aw&&S.wifi){S.wifi=0;S.wfo=1}window.setMode('standby')}},5000);
 R();tickLoop();
-loadWx();setInterval(()=>{if(WD&&Date.now()-WD.ts>18e5)loadWx()},6e4);
+setTimeout(()=>{if(!WD||Date.now()-WD.ts>18e5)loadWx()},NAT?25000:1500);setInterval(()=>{if(WD&&Date.now()-WD.ts>18e5)loadWx()},6e4);
 </script></body></html>

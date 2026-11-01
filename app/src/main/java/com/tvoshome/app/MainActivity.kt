@@ -24,7 +24,7 @@ class MainActivity : Activity() {
         col.setPadding(56, 40, 56, 40)
 
         val title = TextView(this)
-        title.text = "TVOSHOME"
+        title.text = "AppleMe"
         title.textSize = 28f
         col.addView(title)
 

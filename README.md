@@ -1,4 +1,4 @@
-# TVOSHOME – بطاقات Overlay لصندوق أندرويد TV
+# AppleMe – بطاقات Overlay لصندوق أندرويد TV
 
 تطبيق يعرض بطاقات (طقس، مواقيت الصلاة، مباريات كووورة، الرام، المعالج، الساعة) **فوق أي تطبيق** بضغطة مطوّلة على مفتاح تختاره من الريموت. يعمل في الخلفية على **أندرويد 9 → 14** (minSdk 28 / targetSdk 34).
 
@@ -22,14 +22,14 @@
 1. أنشئ مستودعاً جديداً على github.com.
 2. ارفع محتويات هذا المجلد كلها (الأفضل git، وتأكد أن `.github/workflows` اترفع):
    ```bash
-   cd TVOSHOME   # المجلد بعد فك الـ zip
-   git init && git add . && git commit -m "TVOSHOME"
+   cd AppleMe   # المجلد بعد فك الـ zip
+   git init && git add . && git commit -m "AppleMe"
    git branch -M main
-   git remote add origin https://github.com/<اسمك>/TVOSHOME.git
+   git remote add origin https://github.com/<اسمك>/AppleMe.git
    git push -u origin main
    ```
 3. تبويب **Actions** ← **Build APK** (يعمل تلقائياً، أو **Run workflow**).
-4. بعد 3–6 دقائق افتح التشغيل الناجح ← **Artifacts** ← حمّل `TVOSHOME-debug-apk`.
+4. بعد 3–6 دقائق افتح التشغيل الناجح ← **Artifacts** ← حمّل `AppleMe-debug-apk`.
 (محلياً: افتح المجلد في Android Studio ← Build APK، أو `gradle assembleDebug` مع JDK 17 وGradle 8.9.)
 
 ## التثبيت والتفعيل
@@ -37,8 +37,8 @@
 adb connect <IP الصندوق>:5555
 adb install -r app-debug.apk
 ```
-1. افتح **TVOSHOME** ← **Enable the service** ← فعّل *TVOSHOME overlay key*.
-   - أندرويد 13+: لو الزر رمادي: إعدادات ▸ التطبيقات ▸ TVOSHOME ▸ ⋮ ▸ **Allow restricted settings**.
+1. افتح **AppleMe** ← **Enable the service** ← فعّل *AppleMe overlay key*.
+   - أندرويد 13+: لو الزر رمادي: إعدادات ▸ التطبيقات ▸ AppleMe ▸ ⋮ ▸ **Allow restricted settings**.
    - أو عبر adb:
      ```bash
      adb shell settings put secure enabled_accessibility_services com.tvoshome.app/com.tvoshome.app.KeyService
@@ -92,3 +92,11 @@ adb install -r app-debug.apk
 - بطاقة المباريات تنتقل بين المباريات كل **30 ثانية**، ولا تتبدل عند أي إعادة رسم.
 - القنوات الصوتية: لقنوات **beIN Sports Mena N** فقط («صوتية رقم N»، بنفس التحديد الأبيض)، وقناة **stc tv** تظهر «صوتية الإيطالية».
 - ألوان خلفية جديدة: Black / Charcoal / Dark Gray / Gray / Light Gray.
+
+## الاسم والأيقونة (AppleMe / تفحني)
+- الاسم: **AppleMe** (وعلى جهاز لغته العربية يظهر **تفحني**). الأيقونة هي الصورة التي أرسلتها: مربع مدوّر بحواف شفافة. وضعتها كأيقونة تكيّفية بخلفية شفافة داخل المنطقة الآمنة، فتظهر بإطارها المدوّر على أي لانشر/قناع (دائري أو مربع مدوّر)، وبنسخة PNG عادية للأجهزة القديمة، وبانر خاص لأندرويد TV. الـ `applicationId` لم يتغيّر (`com.tvoshome.app`) فيُحدّث فوق النسخة المثبّتة بدون فقد الإعدادات.
+
+## المباريات والتحميل في الخلفية
+- جلب كووورة وتحليلها صار **نيتف بالكامل في خيط خلفي بأولوية منخفضة** (لا WebView ثانٍ): أول مرة بعد 60 ثانية من تشغيل الخدمة ثم كل 30 دقيقة، ولا يعمل أبداً أثناء فتح البطاقات. النتيجة تُحفظ جاهزة على القرص، فعند فتح التطبيق تظهر المباريات فوراً بدون أي شبكة. زر «تحديث الآن» يفرض التحديث (وإن فشل يجرّب الطريقة القديمة بـ WebView).
+- الطقس لا يُجلب إلا بعد 25 ثانية من تشغيل الصفحة، ولا يعيد رسم الواجهة كلها (فقط البطاقات/النافذة المفتوحة).
+- إشعار المباراة صار يعرض: المباراة والوقت والتاريخ و**«شاهد على:»** مع كل القنوات (والقنوات الصوتية).

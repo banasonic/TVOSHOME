@@ -9,6 +9,7 @@ import android.graphics.PixelFormat
 import android.media.AudioManager
 import android.net.wifi.WifiManager
 import android.os.Handler
+import android.util.Base64
 import android.os.Looper
 import android.os.SystemClock
 import android.view.ContextThemeWrapper
@@ -54,6 +55,14 @@ class KeyService : AccessibilityService() {
     private var flashEnd: Runnable? = null
     private var kooraBusy = false
     private var shownAt = 0L
+
+    /** Matches are fetched on a schedule in the background (never while the cards are open). */
+    private val matchRun = object : Runnable {
+        override fun run() {
+            if (mode != "full" && mode != "standby") refreshMatches(false)
+            ui.postDelayed(this, 1800000L)
+        }
+    }
     private val freshRun = Runnable { if (mode == "hidden") rebuildOverlay() }
     private var beatAt = SystemClock.elapsedRealtime()
     private var beatBad = 0
@@ -104,6 +113,8 @@ class KeyService : AccessibilityService() {
         beatAt = SystemClock.elapsedRealtime()
         ui.removeCallbacks(beat)
         ui.postDelayed(beat, 2000L)
+        ui.removeCallbacks(matchRun)
+        ui.postDelayed(matchRun, 60000L)
     }
 
     /** HOME pressed while StandBy / prompt is showing -> leave it (HOME never reaches onKeyEvent). */
@@ -122,6 +133,7 @@ class KeyService : AccessibilityService() {
         instance = null
         ui.removeCallbacks(idleCheck)
         ui.removeCallbacks(beat)
+        ui.removeCallbacks(matchRun)
         ui.removeCallbacks(freshRun)
         ui.post { detach() }
         return super.onUnbind(intent)
@@ -398,6 +410,25 @@ class KeyService : AccessibilityService() {
                 val end = Runnable { if (mode == "toast") applyMode("hidden") }
                 flashEnd = end
                 ui.postDelayed(end, ms.toLong())
+            }
+        }
+    }
+
+    /** Starts a background refresh when needed; returns true if one was started. Result -> window.onKoora. */
+    fun refreshMatches(force: Boolean): Boolean {
+        return MatchesRepo.refresh(applicationContext, force) { json ->
+            if (json != null) {
+                val b = Base64.encodeToString(json.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                js("window.onKoora&&onKoora(true,'$b')")
+            } else if (force) {
+                ui.post {
+                    if (!kooraBusy) {
+                        kooraBusy = true
+                        KooraJob(this, KOORA_URL) { kooraBusy = false }.start()
+                    }
+                }
+            } else {
+                js("window.onKoora&&onKoora(false,'')")
             }
         }
     }

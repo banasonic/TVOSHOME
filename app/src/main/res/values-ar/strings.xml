@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">تفحني</string>
+    <string name="svc_label">مفتاح تفحني للبطاقات</string>
+    <string name="svc_desc">يستمع للمفتاح الذي تختاره في الريموت (ضغطة مطوّلة) لإظهار أو إخفاء بطاقات تفحني فوق أي تطبيق.</string>
+</resources>

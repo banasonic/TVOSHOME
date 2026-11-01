@@ -95,6 +95,9 @@ class Bridge(private val svc: KeyService) {
         }
     }
 
+    @JavascriptInterface fun matchesCache(): String = MatchesRepo.cached(ctx)
+    @JavascriptInterface fun refreshMatches(force: Boolean): Boolean = svc.refreshMatches(force)
+
     @JavascriptInterface fun resetWebView() { svc.rebuild() }
 
     @JavascriptInterface fun showKeyboard() { svc.showKeyboard() }
