@@ -98,6 +98,12 @@ class Bridge(private val svc: KeyService) {
     @JavascriptInterface fun matchesCache(): String = MatchesRepo.cached(ctx)
     @JavascriptInterface fun refreshMatches(force: Boolean): Boolean = svc.refreshMatches(force)
 
+    @JavascriptInterface fun setLogo(on: Boolean, style: Int) {
+        Prefs.setLogo(ctx, on, style)
+        svc.logoConfig()
+    }
+    @JavascriptInterface fun logoSupported(): Boolean = android.os.Build.VERSION.SDK_INT >= 30
+
     @JavascriptInterface fun resetWebView() { svc.rebuild() }
 
     @JavascriptInterface fun showKeyboard() { svc.showKeyboard() }

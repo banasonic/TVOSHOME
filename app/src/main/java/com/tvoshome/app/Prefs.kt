@@ -31,6 +31,10 @@ object Prefs {
     fun highFps(c: Context): Boolean = sp(c).getBoolean("high_fps", true)
     fun setHighFps(c: Context, v: Boolean) { sp(c).edit().putBoolean("high_fps", v).apply() }
 
+    fun logoOn(c: Context): Boolean = sp(c).getBoolean("logo_on", false)
+    fun logoStyle(c: Context): Int = sp(c).getInt("logo_style", 0)
+    fun setLogo(c: Context, on: Boolean, style: Int) { sp(c).edit().putBoolean("logo_on", on).putInt("logo_style", style.coerceIn(0, 2)).apply() }
+
     fun thermalPath(c: Context): String = sp(c).getString("thermal_path", "") ?: ""
     fun setThermalPath(c: Context, v: String) { sp(c).edit().putString("thermal_path", v.trim()).apply() }
 

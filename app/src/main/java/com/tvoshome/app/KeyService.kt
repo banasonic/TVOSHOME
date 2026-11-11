@@ -55,6 +55,7 @@ class KeyService : AccessibilityService() {
     private var flashEnd: Runnable? = null
     private var kooraBusy = false
     private var shownAt = 0L
+    private var cover: LogoCover? = null
 
     /** Matches are fetched on a schedule in the background (never while the cards are open). */
     private val matchRun = object : Runnable {
@@ -115,11 +116,21 @@ class KeyService : AccessibilityService() {
         ui.postDelayed(beat, 2000L)
         ui.removeCallbacks(matchRun)
         ui.postDelayed(matchRun, 60000L)
+        logoConfig()
+    }
+
+    /** Applies the channel-logo cover option (settings changed or service started). */
+    fun logoConfig() {
+        ui.post {
+            val c = cover ?: LogoCover(this).also { cover = it }
+            c.configure()
+        }
     }
 
     /** HOME pressed while StandBy / prompt is showing -> leave it (HOME never reaches onKeyEvent). */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        cover?.onWindow(event.packageName?.toString())
         if (mode != "standby" && mode != "prompt") return
         if (SystemClock.elapsedRealtime() - standbyAt < 2500L) return
         val pkg = event.packageName?.toString() ?: return
@@ -135,7 +146,10 @@ class KeyService : AccessibilityService() {
         ui.removeCallbacks(beat)
         ui.removeCallbacks(matchRun)
         ui.removeCallbacks(freshRun)
-        ui.post { detach() }
+        ui.post {
+            cover?.shutdown()
+            detach()
+        }
         return super.onUnbind(intent)
     }
 
@@ -310,6 +324,7 @@ class KeyService : AccessibilityService() {
             mode = "hidden"
             attached = false
         }
+        cover?.onMode(mode)
     }
 
     fun toggle() {
@@ -466,7 +481,10 @@ class KeyService : AccessibilityService() {
     }
 
     override fun onKeyEvent(e: KeyEvent): Boolean {
-        if (e.action == KeyEvent.ACTION_DOWN) lastInput = SystemClock.elapsedRealtime()
+        if (e.action == KeyEvent.ACTION_DOWN) {
+            lastInput = SystemClock.elapsedRealtime()
+            if (e.repeatCount == 0 && e.keyCode != Prefs.keyCode(this) && (mode == "hidden" || mode == "toast")) cover?.onKey()
+        }
         if (learning) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {
                 learning = false
