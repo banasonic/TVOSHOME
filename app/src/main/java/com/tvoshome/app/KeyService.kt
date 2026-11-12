@@ -133,7 +133,7 @@ class KeyService : AccessibilityService() {
             showMode("hidden")
             ui.postDelayed({
                 Thread {
-                    val r = logoDiag()
+                    val r = logoDiag() + " | " + (cover?.state() ?: "cover=null")
                     ui.post {
                         showMode("full")
                         js("S.dg=" + org.json.JSONObject.quote(r) + ";R()")

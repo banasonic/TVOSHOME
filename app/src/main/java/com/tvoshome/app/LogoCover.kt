@@ -183,7 +183,8 @@ object FreqScan {
  * Long press on the cover (or Settings -> Edit) lets you move and resize it; every change is saved.
  */
 class LogoCover(private val svc: KeyService) {
-    private val ctx: Context = svc.applicationContext
+    private val ctx: Context = svc
+    private var lastErr = ""
     private val ui = Handler(Looper.getMainLooper())
     private var thread: HandlerThread? = null
     private var worker: Handler? = null
@@ -508,8 +509,14 @@ class LogoCover(private val svc: KeyService) {
             v.start()
         } catch (e: Exception) {
             attached = false
+            lastErr = e.toString()
+            android.util.Log.d("LogoCover", "addView failed: " + e)
         }
     }
+
+    /** For the Test report. */
+    fun state(): String = "cover: on=" + enabled + " active=" + active + " attached=" + attached +
+        " mode=" + svc.mode + " rect=" + rect.joinToString(",") + (if (lastErr.isNotEmpty()) " err=" + lastErr else "")
 
     private fun layoutCover() {
         if (!attached) return
