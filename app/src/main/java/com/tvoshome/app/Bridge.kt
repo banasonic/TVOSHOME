@@ -105,6 +105,13 @@ class Bridge(private val svc: KeyService) {
     @JavascriptInterface fun logoEdit() { svc.logoEdit() }
     @JavascriptInterface fun logoReset() { svc.logoReset() }
     @JavascriptInterface fun logoDiag() { svc.logoDiagLater() }
+    @JavascriptInterface fun setMatch(on: Boolean) {
+        Prefs.setMatchOn(ctx, on)
+        svc.logoConfig()
+    }
+    @JavascriptInterface fun matchEdit() { svc.matchEdit() }
+    @JavascriptInterface fun matchReset() { svc.matchReset() }
+    @JavascriptInterface fun matchTest() { svc.matchTestLater() }
 
     @JavascriptInterface fun resetWebView() { svc.rebuild() }
 

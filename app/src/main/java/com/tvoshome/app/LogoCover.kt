@@ -90,7 +90,7 @@ object FreqScan {
     }
 
     /** Walks every window (max ~4000 nodes) and returns what it found, with the screen position of each hit. */
-    fun scan(svc: AccessibilityService, hits: ArrayList<FreqHit>) {
+    fun scan(svc: AccessibilityService, hits: ArrayList<FreqHit>, texts: ArrayList<TextHit>? = null) {
         var count = 0
         for (root in roots(svc)) {
             val stack = ArrayDeque<AccessibilityNodeInfo>()
@@ -121,13 +121,19 @@ object FreqScan {
                     val j = classify(sb)
                     if (j > r) r = j
                 }
-                if (r > NONE && hits.size < 12) {
+                val wantText = texts != null && texts.size < 250
+                if ((r > NONE && hits.size < 12) || wantText) {
                     val b = Rect()
                     n.getBoundsInScreen(b)
-                    hits.add(FreqHit(r, b))
+                    if (r > NONE && hits.size < 12) hits.add(FreqHit(r, b))
+                    if (wantText && texts != null) {
+                        val tt = n.text
+                        if (tt != null && tt.length in 5..160) texts.add(TextHit(tt.toString(), b))
+                        if (sb != null && sb.length in 5..160) texts.add(TextHit(sb.toString().trim(), b))
+                    }
                 }
                 free(n)
-                if (r == TARGET) {
+                if (r == TARGET && texts == null) {
                     while (!stack.isEmpty()) free(stack.removeLast())
                     return
                 }
@@ -190,6 +196,7 @@ class LogoCover(private val svc: KeyService) {
     private var worker: Handler? = null
 
     @Volatile private var enabled = false
+    @Volatile private var wantLogo = false
     @Volatile private var scanPending = false
     private var lastScan = 0L
     private var style = 0
@@ -209,8 +216,13 @@ class LogoCover(private val svc: KeyService) {
     private val stopEditRun = Runnable { if (editing) stopEdit() }
 
     fun configure() {
-        enabled = Prefs.logoOn(ctx)
+        wantLogo = Prefs.logoOn(ctx)
+        enabled = wantLogo || Prefs.matchOn(ctx)
         style = Prefs.logoStyle(ctx)
+        if (!wantLogo) {
+            if (editing) stopEdit()
+            hideCover()
+        }
         if (!enabled) {
             stopWorker()
             if (editing) stopEdit()
@@ -296,13 +308,14 @@ class LogoCover(private val svc: KeyService) {
         val m = svc.mode
         if (m == "full" || m == "standby" || m == "prompt") return
         val hits = ArrayList<FreqHit>()
-        try { FreqScan.scan(svc, hits) } catch (e: Exception) { }
-        if (hits.isEmpty()) return
-        ui.post { handle(hits) }
+        val texts: ArrayList<TextHit>? = if (svc.matchOn()) ArrayList() else null
+        try { FreqScan.scan(svc, hits, texts) } catch (e: Exception) { }
+        if (texts != null) svc.matchFeed(texts, hits.isNotEmpty(), sw, sh)
+        if (wantLogo && hits.isNotEmpty()) ui.post { handle(hits) }
     }
 
     private fun handle(hits: ArrayList<FreqHit>) {
-        if (!enabled || editing) return
+        if (!wantLogo || editing) return
         var target: FreqHit? = null
         for (h in hits) if (h.kind == FreqScan.TARGET) { target = h; break }
         if (target != null) {
@@ -404,7 +417,7 @@ class LogoCover(private val svc: KeyService) {
     }
 
     fun startEdit() {
-        if (!enabled || editing) return
+        if (!wantLogo || editing) return
         loadRect()
         if (!active) {
             preview = true
@@ -765,38 +778,90 @@ class CoverView(context: Context, private var style: Int) : View(context) {
     private val facePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeCap = Paint.Cap.ROUND; style = Paint.Style.STROKE }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
     }
+    private val DAYS = arrayOf("الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت")
+    private val MONS = arrayOf("يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر")
+    private val HMONS = arrayOf("محرم", "صفر", "ربيع الأول", "ربيع الآخر", "جمادى الأولى", "جمادى الآخرة", "رجب", "شعبان", "رمضان", "شوال", "ذو القعدة", "ذو الحجة")
+    private var hijriDay = -1
+    private var hijriText = ""
+
+    private fun hijri(cal: Calendar): String {
+        val key = cal.get(Calendar.YEAR) * 400 + cal.get(Calendar.DAY_OF_YEAR)
+        if (key == hijriDay) return hijriText
+        hijriDay = key
+        hijriText = try {
+            val ic = android.icu.util.IslamicCalendar()
+            ic.calculationType = android.icu.util.IslamicCalendar.CalculationType.ISLAMIC_UMALQURA
+            ic.timeInMillis = cal.timeInMillis
+            ic.get(android.icu.util.Calendar.DAY_OF_MONTH).toString() + " " + HMONS[ic.get(android.icu.util.Calendar.MONTH).coerceIn(0, 11)] +
+                " " + ic.get(android.icu.util.Calendar.YEAR) + " هـ"
+        } catch (e: Exception) { "" }
+        return hijriText
+    }
+
+    private fun line(c: Canvas, t: String, cx: Float, base: Float, maxW: Float, size: Float, color: Int) {
+        if (t.isEmpty()) return
+        textPaint.color = color
+        textPaint.textSize = size
+        val tw = textPaint.measureText(t)
+        if (tw > maxW && tw > 0f) textPaint.textSize = size * maxW / tw
+        c.drawText(t, cx, base, textPaint)
+    }
 
     private fun drawAnalog(c: Canvas, w: Float, h: Float) {
-        c.drawColor(0xFF08080C.toInt())
-        val cx = w / 2f
+        c.drawColor(0xFFFFFFFF.toInt())
+        val cal = Calendar.getInstance()
+        val d = minOf(h * 0.8f, w * 0.44f)
+        val cx = h * 0.1f + d / 2f
         val cy = h / 2f
-        val r = minOf(w, h) * 0.46f
+        val r = d / 2f
         facePaint.style = Paint.Style.FILL
-        facePaint.color = 0xFF17171E.toInt()
+        facePaint.color = 0xFFF2F2F7.toInt()
         c.drawCircle(cx, cy, r, facePaint)
-        linePaint.color = 0xFFE9E9F0.toInt()
-        linePaint.strokeWidth = r * 0.04f
+        linePaint.color = 0xFFD1D1D6.toInt()
+        linePaint.strokeWidth = r * 0.05f
         c.drawCircle(cx, cy, r, linePaint)
         for (i in 0 until 12) {
             val a = Math.toRadians(i * 30.0 - 90.0)
-            val l0 = if (i % 3 == 0) 0.82f else 0.9f
-            linePaint.strokeWidth = if (i % 3 == 0) r * 0.06f else r * 0.03f
+            val q = i % 3 == 0
+            linePaint.color = if (q) 0xFF1C1C1E.toInt() else 0xFF8E8E93.toInt()
+            linePaint.strokeWidth = if (q) r * 0.07f else r * 0.035f
+            val l0 = if (q) 0.78f else 0.86f
             c.drawLine(cx + (Math.cos(a) * r * l0).toFloat(), cy + (Math.sin(a) * r * l0).toFloat(),
-                cx + (Math.cos(a) * r * 0.96f).toFloat(), cy + (Math.sin(a) * r * 0.96f).toFloat(), linePaint)
+                cx + (Math.cos(a) * r * 0.94f).toFloat(), cy + (Math.sin(a) * r * 0.94f).toFloat(), linePaint)
         }
-        val cal = Calendar.getInstance()
         val sec = cal.get(Calendar.SECOND)
         val min = cal.get(Calendar.MINUTE) + sec / 60f
         val hr = (cal.get(Calendar.HOUR) % 12) + min / 60f
-        hand(c, cx, cy, hr * 30.0, r * 0.5f, r * 0.075f, 0xFFFFFFFF.toInt())
-        hand(c, cx, cy, min * 6.0, r * 0.76f, r * 0.05f, 0xFFFFFFFF.toInt())
-        hand(c, cx, cy, sec * 6.0, r * 0.86f, r * 0.025f, 0xFFFF453A.toInt())
-        facePaint.color = 0xFFFF453A.toInt()
-        c.drawCircle(cx, cy, r * 0.05f, facePaint)
+        hand(c, cx, cy, hr * 30.0, r * 0.5f, r * 0.09f, 0xFF1C1C1E.toInt())
+        hand(c, cx, cy, min * 6.0, r * 0.75f, r * 0.06f, 0xFF1C1C1E.toInt())
+        hand(c, cx, cy, sec * 6.0, r * 0.84f, r * 0.03f, 0xFFFF9F0A.toInt())
+        facePaint.color = 0xFFFF9F0A.toInt()
+        c.drawCircle(cx, cy, r * 0.06f, facePaint)
+        // text block (right of the face)
+        val left = h * 0.1f + d + h * 0.1f
+        val bw = w - left - h * 0.08f
+        if (bw > 20f) {
+            val mx = left + bw / 2f
+            line(c, DAYS[cal.get(Calendar.DAY_OF_WEEK) - 1], mx, h * 0.30f, bw, h * 0.17f, 0xFF1C1C1E.toInt())
+            line(c, cal.get(Calendar.DAY_OF_MONTH).toString() + " " + MONS[cal.get(Calendar.MONTH)] + " " + cal.get(Calendar.YEAR), mx, h * 0.50f, bw, h * 0.115f, 0xFF3A3A3C.toInt())
+            line(c, hijri(cal), mx, h * 0.68f, bw, h * 0.115f, 0xFF6E6E73.toInt())
+            line(c, timeText(cal, false), mx, h * 0.88f, bw, h * 0.13f, 0xFFFF9F0A.toInt())
+        }
+    }
+
+    private fun timeText(cal: Calendar, ampm: Boolean): String {
+        var hh = cal.get(Calendar.HOUR_OF_DAY)
+        val mm = cal.get(Calendar.MINUTE)
+        var suffix = ""
+        if (!is24) {
+            suffix = if (hh >= 12) " PM" else " AM"
+            hh %= 12
+            if (hh == 0) hh = 12
+        }
+        return (if (is24 && hh < 10) "0" else "") + hh + ":" + (if (mm < 10) "0" else "") + mm + (if (ampm) suffix else "")
     }
 
     private fun hand(c: Canvas, cx: Float, cy: Float, deg: Double, len: Float, width: Float, color: Int) {
@@ -807,32 +872,13 @@ class CoverView(context: Context, private var style: Int) : View(context) {
     }
 
     private fun drawDigital(c: Canvas, w: Float, h: Float) {
-        val bg = Paint(Paint.ANTI_ALIAS_FLAG)
-        bg.shader = LinearGradient(0f, 0f, 0f, h, 0xFF16161D.toInt(), 0xFF050508.toInt(), Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w, h, bg)
+        c.drawColor(0xFFFFFFFF.toInt())
         val cal = Calendar.getInstance()
-        var hh = cal.get(Calendar.HOUR_OF_DAY)
-        var suffix = ""
-        if (!is24) {
-            suffix = if (hh >= 12) "PM" else "AM"
-            hh = hh % 12
-            if (hh == 0) hh = 12
-        }
-        val txt = (if (is24 && hh < 10) "0" else "") + hh + ":" + (if (cal.get(Calendar.MINUTE) < 10) "0" else "") + cal.get(Calendar.MINUTE)
-        var size = h * 0.62f
-        textPaint.textSize = size
-        val tw = textPaint.measureText(txt)
-        val maxW = w * (if (suffix.isEmpty()) 0.92f else 0.78f)
-        if (tw > maxW) {
-            size *= maxW / tw
-            textPaint.textSize = size
-        }
-        val cx = if (suffix.isEmpty()) w / 2f else w * 0.46f
-        val cy = h / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
-        c.drawText(txt, cx, cy, textPaint)
-        if (suffix.isNotEmpty()) {
-            textPaint.textSize = size * 0.32f
-            c.drawText(suffix, w * 0.89f, h / 2f - (textPaint.descent() + textPaint.ascent()) / 2f + size * 0.2f, textPaint)
-        }
+        val cx = w / 2f
+        val bw = w * 0.88f
+        line(c, timeText(cal, true), cx, h * 0.40f, bw, h * 0.34f, 0xFF1C1C1E.toInt())
+        line(c, DAYS[cal.get(Calendar.DAY_OF_WEEK) - 1] + " " + cal.get(Calendar.DAY_OF_MONTH) + " " + MONS[cal.get(Calendar.MONTH)] + " " + cal.get(Calendar.YEAR),
+            cx, h * 0.64f, bw, h * 0.13f, 0xFF3A3A3C.toInt())
+        line(c, hijri(cal), cx, h * 0.84f, bw, h * 0.13f, 0xFF6E6E73.toInt())
     }
 }

@@ -56,6 +56,7 @@ class KeyService : AccessibilityService() {
     private var kooraBusy = false
     private var shownAt = 0L
     private var cover: LogoCover? = null
+    private var matchW: MatchWatcher? = null
 
     /** Matches are fetched on a schedule in the background (never while the cards are open). */
     private val matchRun = object : Runnable {
@@ -143,6 +144,42 @@ class KeyService : AccessibilityService() {
         }
     }
 
+    fun matchOn(): Boolean = matchW?.enabled == true
+
+    fun matchFeed(texts: List<TextHit>, hasFreq: Boolean, sw: Int, sh: Int) {
+        matchW?.feed(texts, hasFreq, sw, sh)
+    }
+
+    fun matchEdit() {
+        ui.post {
+            showMode("hidden")
+            ui.postDelayed({ matchW?.card?.startEdit() }, 350L)
+        }
+    }
+
+    fun matchReset() {
+        ui.post { matchW?.card?.reset() }
+    }
+
+    /** Settings "Match test": hide the cards 8 s (show the match info meanwhile), then report + show the card. */
+    fun matchTestLater() {
+        ui.post {
+            showMode("hidden")
+            ui.postDelayed({
+                Thread {
+                    val hits = ArrayList<FreqHit>()
+                    val texts = ArrayList<TextHit>()
+                    try { FreqScan.scan(this, hits, texts) } catch (e: Exception) { }
+                    val r = try { matchW?.test(texts, hits.isNotEmpty()) ?: "match option is off" } catch (e: Exception) { "error: " + e }
+                    ui.post {
+                        js("S.dg2=" + org.json.JSONObject.quote(r) + ";R()")
+                        ui.postDelayed({ showMode("full") }, 11000L)
+                    }
+                }.start()
+            }, 8000L)
+        }
+    }
+
     fun isHome(pkg: String): Boolean = try { homePackages().contains(pkg) } catch (e: Exception) { false }
 
     /** Text summary of what the accessibility service can read on screen (for the Settings "Test" button). */
@@ -155,6 +192,8 @@ class KeyService : AccessibilityService() {
     /** Applies the channel-logo cover option (settings changed or service started). */
     fun logoConfig() {
         ui.post {
+            val m = matchW ?: MatchWatcher(this).also { matchW = it }
+            m.configure()
             val c = cover ?: LogoCover(this).also { cover = it }
             c.configure()
         }
@@ -186,6 +225,7 @@ class KeyService : AccessibilityService() {
         ui.removeCallbacks(freshRun)
         ui.post {
             cover?.shutdown()
+            matchW?.card?.shutdown()
             detach()
         }
         return super.onUnbind(intent)
@@ -363,6 +403,7 @@ class KeyService : AccessibilityService() {
             attached = false
         }
         cover?.onMode(mode)
+        matchW?.card?.onMode(mode)
     }
 
     fun toggle() {
@@ -521,6 +562,8 @@ class KeyService : AccessibilityService() {
     override fun onKeyEvent(e: KeyEvent): Boolean {
         val cv = cover
         if (cv != null && cv.editing) return cv.onEditKey(e)
+        val mcard = matchW?.card
+        if (mcard != null && mcard.editing) return mcard.onEditKey(e)
         if (e.action == KeyEvent.ACTION_DOWN) lastInput = SystemClock.elapsedRealtime()
         if (learning) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {

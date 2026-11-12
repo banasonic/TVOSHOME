@@ -16,6 +16,13 @@ object KooraParser {
     private val aRe = Regex("<a\\s[^>]*?href\\s*=\\s*[\"']([^\"']*)[\"'][^>]*>(.*?)</a>", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
     private val timeRe = Regex("^\\d{1,2}:\\d{2}$")
     private val numRe = Regex("&#(\\d+);")
+    private val imgRe = Regex("<img[^>]*?(?:data-src|src)\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+
+    private fun abs(u: String): String = when {
+        u.startsWith("//") -> "https:" + u
+        u.startsWith("/") -> "https://www.kooora.com" + u
+        else -> u
+    }
 
     private fun decode(t: String): String {
         var s = t.replace("&nbsp;", " ").replace("&amp;", "&").replace("&quot;", "\"")
@@ -95,6 +102,9 @@ object KooraParser {
                     .put("t", if (k >= 0) ts[k] else "")
                     .put("st", if (k < 0) ts.drop(4).joinToString(" ") else "")
                     .put("x", if (k >= 0) ts.drop(k + 1).joinToString(" ") else "")
+                    .put("u", abs(hr.substringBefore('#')))
+                    .put("hl", imgRe.findAll(inner).map { abs(decode(it.groupValues[1])) }.toList().getOrElse(0) { "" })
+                    .put("al", imgRe.findAll(inner).map { abs(decode(it.groupValues[1])) }.toList().getOrElse(1) { "" })
                     .put("ch", JSONArray())
                 out.put(o)
                 cur = o

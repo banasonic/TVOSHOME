@@ -53,6 +53,25 @@ object Prefs {
         sp(c).edit().putFloat("logo_ax", a[0]).putFloat("logo_ay", a[1]).putFloat("logo_az", a[2]).putFloat("logo_aw", a[3]).apply()
     }
 
+    fun matchOn(c: Context): Boolean = sp(c).getBoolean("match_on", false)
+    fun setMatchOn(c: Context, on: Boolean) { sp(c).edit().putBoolean("match_on", on).apply() }
+    fun matchRect(c: Context): FloatArray {
+        val p = sp(c)
+        return floatArrayOf(p.getFloat("mt_fx", 0.76f), p.getFloat("mt_fy", 0.36f), p.getFloat("mt_fw", 0.22f), p.getFloat("mt_fh", 0.24f))
+    }
+    fun setMatchRect(c: Context, r: FloatArray) {
+        sp(c).edit().putFloat("mt_fx", r[0]).putFloat("mt_fy", r[1]).putFloat("mt_fw", r[2]).putFloat("mt_fh", r[3]).apply()
+    }
+    fun resetMatchRect(c: Context) { sp(c).edit().remove("mt_fx").remove("mt_fy").remove("mt_fw").remove("mt_fh").apply() }
+    fun matchAnchor(c: Context): FloatArray? {
+        val p = sp(c)
+        if (!p.contains("mt_ax")) return null
+        return floatArrayOf(p.getFloat("mt_ax", 0f), p.getFloat("mt_ay", 0f), p.getFloat("mt_az", 0f), p.getFloat("mt_aw", 0f))
+    }
+    fun setMatchAnchor(c: Context, a: FloatArray) {
+        sp(c).edit().putFloat("mt_ax", a[0]).putFloat("mt_ay", a[1]).putFloat("mt_az", a[2]).putFloat("mt_aw", a[3]).apply()
+    }
+
     fun resetLogoRect(c: Context) {
         sp(c).edit().remove("logo_fx").remove("logo_fy").remove("logo_fw").remove("logo_fh").apply()
     }
