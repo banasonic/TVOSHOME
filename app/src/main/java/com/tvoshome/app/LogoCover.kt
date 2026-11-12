@@ -10,6 +10,7 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -26,19 +27,31 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import android.accessibilityservice.AccessibilityService
 import java.util.ArrayDeque
 import java.util.Calendar
 import java.util.Random
 
-/** Looks for the satellite parameters text "11258 V 30000" (symbol rate +-4) in any app's on-screen text. */
-object FreqScan {
-    private val RX = Regex("(\\d{4,5})\\D{0,3}([VvHh])\\D{0,3}(\\d{4,5})")
-    const val NONE = 0
-    const val OTHER = 1     // some other frequency line is on screen
-    const val TARGET = 2    // 11258 V 30000 (+-4) is on screen
+/** One finding of [FreqScan]. */
+class FreqHit(val kind: Int, val r: Rect)
 
-    private fun classify(t: CharSequence?): Int {
-        if (t == null || t.length < 9 || t.length > 300) return NONE
+/** Looks for the satellite parameters text "11258 V 30000" (symbol rate +-4) in the text of every window. */
+object FreqScan {
+    private val RX = Regex("(\\d{4,5})\\D{0,6}([VvHh])\\D{0,6}(\\d{4,5})")
+    private val UNITS = Regex("(?i)(mhz|msym/s|ksym/s|msps|ksps|ms/s|ks/s|sym/s|sr|symbol rate|freq(uency)?|pol)")
+    private val VERT = Regex("(?i)vertical|عمودي|رأسي")
+    private val HORZ = Regex("(?i)horizontal|أفقي")
+    const val NONE = 0
+    const val OTHER = 1     // some other frequency line
+    const val TARGET = 2    // 11258 V 30000 (+-4)
+
+    fun classify(raw: CharSequence?): Int {
+        if (raw == null || raw.length < 9 || raw.length > 400) return NONE
+        var t = raw.toString()
+        t = VERT.replace(t, " V ")
+        t = HORZ.replace(t, " H ")
+        t = UNITS.replace(t, " ")
         var res = NONE
         for (m in RX.findAll(t)) {
             val f = m.groupValues[1].toInt()
@@ -54,46 +67,109 @@ object FreqScan {
         try { n.recycle() } catch (e: Exception) { }
     }
 
-    /** Walks the window (max ~1500 nodes) and returns NONE / OTHER / TARGET. */
-    fun scan(root: AccessibilityNodeInfo): Int {
-        var best = NONE
+    private fun roots(svc: AccessibilityService): List<AccessibilityNodeInfo> {
+        val out = ArrayList<AccessibilityNodeInfo>()
+        try {
+            val ws = svc.windows
+            if (ws != null) for (w in ws) {
+                try {
+                    if (w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY || w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+                    val r = w.root ?: continue
+                    if (r.packageName?.toString() == svc.packageName) { free(r); continue }
+                    out.add(r)
+                } catch (e: Exception) { }
+            }
+        } catch (e: Exception) { }
+        if (out.isEmpty()) {
+            try {
+                val r = svc.rootInActiveWindow
+                if (r != null && r.packageName?.toString() != svc.packageName) out.add(r) else if (r != null) free(r)
+            } catch (e: Exception) { }
+        }
+        return out
+    }
+
+    /** Walks every window (max ~4000 nodes) and returns what it found, with the screen position of each hit. */
+    fun scan(svc: AccessibilityService, hits: ArrayList<FreqHit>) {
         var count = 0
-        val stack = ArrayDeque<AccessibilityNodeInfo>()
-        stack.add(root)
-        while (!stack.isEmpty()) {
-            val n = stack.removeLast()
-            if (count >= 1500) {
-                free(n)
-                continue
-            }
-            count++
-            var r = classify(n.text)
-            if (r < TARGET) {
-                val d = classify(n.contentDescription)
-                if (d > r) r = d
-            }
-            val cc = n.childCount
-            val sb = if (cc in 2..6) StringBuilder() else null
-            for (i in 0 until cc) {
-                val c = n.getChild(i) ?: continue
-                if (sb != null) {
-                    val ct = c.text
-                    if (ct != null && ct.isNotEmpty()) sb.append(ct).append(' ')
+        for (root in roots(svc)) {
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            while (!stack.isEmpty()) {
+                val n = stack.removeLast()
+                if (count >= 4000) {
+                    free(n)
+                    continue
                 }
-                stack.add(c)
-            }
-            if (sb != null && sb.length > 8 && r < TARGET) {
-                val j = classify(sb)
-                if (j > r) r = j
-            }
-            if (r > best) best = r
-            if (n !== root) free(n)
-            if (best == TARGET) {
-                while (!stack.isEmpty()) free(stack.removeLast())
-                return TARGET
+                count++
+                var r = classify(n.text)
+                if (r < TARGET) {
+                    val d = classify(n.contentDescription)
+                    if (d > r) r = d
+                }
+                val cc = n.childCount
+                val sb = if (cc in 2..6) StringBuilder() else null
+                for (i in 0 until cc) {
+                    val c = n.getChild(i) ?: continue
+                    if (sb != null) {
+                        val ct = c.text
+                        if (ct != null && ct.isNotEmpty()) sb.append(ct).append(' ')
+                    }
+                    stack.add(c)
+                }
+                if (sb != null && sb.length > 8 && r < TARGET) {
+                    val j = classify(sb)
+                    if (j > r) r = j
+                }
+                if (r > NONE && hits.size < 12) {
+                    val b = Rect()
+                    n.getBoundsInScreen(b)
+                    hits.add(FreqHit(r, b))
+                }
+                free(n)
+                if (r == TARGET) {
+                    while (!stack.isEmpty()) free(stack.removeLast())
+                    return
+                }
             }
         }
-        return best
+    }
+
+    /** What the service can see: windows, node/text counts and any frequency-like text. */
+    fun diag(svc: AccessibilityService): String {
+        val sb = StringBuilder()
+        var wins = 0
+        var nodes = 0
+        var texts = 0
+        val seen = ArrayList<String>()
+        val pk = ArrayList<String>()
+        for (root in roots(svc)) {
+            wins++
+            pk.add(root.packageName?.toString() ?: "?")
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            while (!stack.isEmpty()) {
+                val n = stack.removeLast()
+                if (nodes >= 4000) { free(n); continue }
+                nodes++
+                val t = n.text?.toString() ?: n.contentDescription?.toString()
+                if (!t.isNullOrEmpty()) {
+                    texts++
+                    if (seen.size < 6 && t.length < 120 && Regex("\\d{4,5}").containsMatchIn(t) && Regex("(?i)[vh]").containsMatchIn(t)) seen.add(t.replace('\n', ' '))
+                }
+                for (i in 0 until n.childCount) {
+                    val c = n.getChild(i) ?: continue
+                    stack.add(c)
+                }
+                free(n)
+            }
+        }
+        val hits = ArrayList<FreqHit>()
+        scan(svc, hits)
+        sb.append("windows=").append(wins).append(" [").append(pk.joinToString(",")).append("] nodes=").append(nodes).append(" texts=").append(texts)
+        sb.append(" | match=").append(if (hits.any { it.kind == TARGET }) "FOUND" else if (hits.isNotEmpty()) "other-freq" else "none")
+        if (seen.isNotEmpty()) sb.append(" | samples: ").append(seen.joinToString(" ; "))
+        return sb.toString()
     }
 }
 
@@ -123,8 +199,8 @@ class LogoCover(private val svc: KeyService) {
     private var preview = false
     @Volatile var editing = false
     private var sizeMode = false
-    private var coverPkg: String? = null
-    private var otherCount = 0
+    private var anchor: FloatArray? = null
+    private var lastDur = 0L
     private var rect = IntArray(4)
     private var sw = 1920
     private var sh = 1080
@@ -145,7 +221,13 @@ class LogoCover(private val svc: KeyService) {
             t.start()
             thread = t
             worker = Handler(t.looper)
+            worker?.postDelayed(pollRun, 1500L)
         }
+        val dm = DisplayMetrics()
+        (ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
+        sw = dm.widthPixels
+        sh = dm.heightPixels
+        anchor = Prefs.logoAnchor(ctx)
         view?.setStyle(style)
         requestScan()
     }
@@ -167,16 +249,25 @@ class LogoCover(private val svc: KeyService) {
     // ------------------------------------------------------------------ scanning
 
     private fun ignored(pkg: String): Boolean =
-        pkg == ctx.packageName || pkg == "com.android.systemui" || pkg.contains("inputmethod") || pkg.contains("keyboard")
+        pkg == ctx.packageName || pkg.contains("inputmethod") || pkg.contains("keyboard")
 
+    private val pollRun = object : Runnable {
+        override fun run() {
+            if (!enabled) return
+            requestScan()
+            worker?.postDelayed(this, 2000L)
+        }
+    }
+
+    /** Any change in any window (the info bar is often a separate window). */
     fun onContent(pkg: String?) {
-        if (!enabled || pkg == null || ignored(pkg)) return
+        if (!enabled || (pkg != null && ignored(pkg))) return
         requestScan()
     }
 
     fun onWindow(pkg: String?) {
         if (!enabled || pkg == null || ignored(pkg)) return
-        if (active && !preview && !editing && coverPkg != null && pkg != coverPkg) hideCover()
+        if (active && !preview && !editing && svc.isHome(pkg)) hideCover()
         requestScan()
     }
 
@@ -184,41 +275,59 @@ class LogoCover(private val svc: KeyService) {
         val w = worker ?: return
         if (scanPending) return
         scanPending = true
-        val wait = maxOf(0L, 700L - (SystemClock.elapsedRealtime() - lastScan))
+        val wait = maxOf(0L, maxOf(500L, lastDur * 3L) - (SystemClock.elapsedRealtime() - lastScan))
         w.postDelayed({
             scanPending = false
-            lastScan = SystemClock.elapsedRealtime()
+            val t0 = SystemClock.elapsedRealtime()
+            lastScan = t0
             doScan()
+            lastDur = SystemClock.elapsedRealtime() - t0
         }, wait)
+    }
+
+    private fun anchorRect(): Rect? {
+        val a = anchor ?: return null
+        return Rect((a[0] * sw).toInt(), (a[1] * sh).toInt(), (a[2] * sw).toInt(), (a[3] * sh).toInt())
     }
 
     private fun doScan() {
         if (!enabled || editing) return
         val m = svc.mode
         if (m == "full" || m == "standby" || m == "prompt") return
-        val root = try { svc.rootInActiveWindow } catch (e: Exception) { null } ?: return
-        val pkg = root.packageName?.toString()
-        if (pkg == null || ignored(pkg)) {
-            try { root.recycle() } catch (e: Exception) { }
-            return
-        }
-        val res = try { FreqScan.scan(root) } catch (e: Exception) { FreqScan.NONE }
-        ui.post { handle(res, pkg) }
+        val hits = ArrayList<FreqHit>()
+        try { FreqScan.scan(svc, hits) } catch (e: Exception) { }
+        if (hits.isEmpty()) return
+        ui.post { handle(hits) }
     }
 
-    private fun handle(res: Int, pkg: String) {
+    private fun handle(hits: ArrayList<FreqHit>) {
         if (!enabled || editing) return
-        if (res == FreqScan.TARGET) {
-            otherCount = 0
+        var target: FreqHit? = null
+        for (h in hits) if (h.kind == FreqScan.TARGET) { target = h; break }
+        if (target != null) {
+            // remember where the frequency text lives (info bar / list) so later changes there are noticed
+            val r = target.r
+            if (sw > 0 && sh > 0 && r.width() > 0 && r.height() > 0) {
+                val a = floatArrayOf(r.left / sw.toFloat(), r.top / sh.toFloat(), r.right / sw.toFloat(), r.bottom / sh.toFloat())
+                anchor = a
+                Prefs.setLogoAnchor(ctx, a)
+            }
             if (!active) {
-                coverPkg = pkg
                 preview = false
                 showCover()
             }
-        } else if (res == FreqScan.OTHER) {
-            if (active && !preview) {
-                otherCount++
-                if (otherCount >= 2) hideCover()
+            return
+        }
+        // another frequency in the same place the target was seen = channels changed -> remove the cover
+        if (active && !preview) {
+            val ar = anchorRect() ?: return
+            val grow = maxOf(ar.width(), ar.height()) / 4
+            ar.inset(-grow, -grow)
+            for (h in hits) {
+                if (h.kind == FreqScan.OTHER && Rect.intersects(ar, h.r)) {
+                    hideCover()
+                    return
+                }
             }
         }
     }
@@ -299,7 +408,6 @@ class LogoCover(private val svc: KeyService) {
         if (!active) {
             preview = true
             active = true
-            coverPkg = null
         }
         ensureView()
         editing = true
@@ -426,8 +534,6 @@ class LogoCover(private val svc: KeyService) {
     fun hideCover() {
         active = false
         preview = false
-        coverPkg = null
-        otherCount = 0
         detachView()
     }
 }

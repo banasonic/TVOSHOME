@@ -104,6 +104,7 @@ class Bridge(private val svc: KeyService) {
     }
     @JavascriptInterface fun logoEdit() { svc.logoEdit() }
     @JavascriptInterface fun logoReset() { svc.logoReset() }
+    @JavascriptInterface fun logoDiag() { svc.logoDiagLater() }
 
     @JavascriptInterface fun resetWebView() { svc.rebuild() }
 

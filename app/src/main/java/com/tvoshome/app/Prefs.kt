@@ -43,6 +43,16 @@ object Prefs {
     fun setLogoRect(c: Context, r: FloatArray) {
         sp(c).edit().putFloat("logo_fx", r[0]).putFloat("logo_fy", r[1]).putFloat("logo_fw", r[2]).putFloat("logo_fh", r[3]).apply()
     }
+    /** Where the frequency text was last seen (fractions: left, top, right, bottom), or null. */
+    fun logoAnchor(c: Context): FloatArray? {
+        val p = sp(c)
+        if (!p.contains("logo_ax")) return null
+        return floatArrayOf(p.getFloat("logo_ax", 0f), p.getFloat("logo_ay", 0f), p.getFloat("logo_az", 0f), p.getFloat("logo_aw", 0f))
+    }
+    fun setLogoAnchor(c: Context, a: FloatArray) {
+        sp(c).edit().putFloat("logo_ax", a[0]).putFloat("logo_ay", a[1]).putFloat("logo_az", a[2]).putFloat("logo_aw", a[3]).apply()
+    }
+
     fun resetLogoRect(c: Context) {
         sp(c).edit().remove("logo_fx").remove("logo_fy").remove("logo_fw").remove("logo_fh").apply()
     }

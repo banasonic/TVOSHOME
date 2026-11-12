@@ -127,6 +127,27 @@ class KeyService : AccessibilityService() {
         }
     }
 
+    /** Settings "Test": hide the cards for 8 s (show the info bar meanwhile), then report what was readable. */
+    fun logoDiagLater() {
+        ui.post {
+            showMode("hidden")
+            ui.postDelayed({
+                Thread {
+                    val r = logoDiag()
+                    ui.post {
+                        showMode("full")
+                        js("S.dg=" + org.json.JSONObject.quote(r) + ";R()")
+                    }
+                }.start()
+            }, 8000L)
+        }
+    }
+
+    fun isHome(pkg: String): Boolean = try { homePackages().contains(pkg) } catch (e: Exception) { false }
+
+    /** Text summary of what the accessibility service can read on screen (for the Settings "Test" button). */
+    fun logoDiag(): String = try { FreqScan.diag(this) } catch (e: Exception) { "error: " + e }
+
     fun logoReset() {
         ui.post { cover?.resetRect() }
     }
@@ -142,7 +163,7 @@ class KeyService : AccessibilityService() {
     /** HOME pressed while StandBy / prompt is showing -> leave it (HOME never reaches onKeyEvent). */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
             cover?.onContent(event.packageName?.toString())
             return
         }
