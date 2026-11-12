@@ -35,6 +35,18 @@ object Prefs {
     fun logoStyle(c: Context): Int = sp(c).getInt("logo_style", 0)
     fun setLogo(c: Context, on: Boolean, style: Int) { sp(c).edit().putBoolean("logo_on", on).putInt("logo_style", style.coerceIn(0, 2)).apply() }
 
+    /** Cover rectangle as fractions of the screen: left, top, width, height. */
+    fun logoRect(c: Context): FloatArray {
+        val p = sp(c)
+        return floatArrayOf(p.getFloat("logo_fx", 0.815f), p.getFloat("logo_fy", 0.03f), p.getFloat("logo_fw", 0.16f), p.getFloat("logo_fh", 0.13f))
+    }
+    fun setLogoRect(c: Context, r: FloatArray) {
+        sp(c).edit().putFloat("logo_fx", r[0]).putFloat("logo_fy", r[1]).putFloat("logo_fw", r[2]).putFloat("logo_fh", r[3]).apply()
+    }
+    fun resetLogoRect(c: Context) {
+        sp(c).edit().remove("logo_fx").remove("logo_fy").remove("logo_fw").remove("logo_fh").apply()
+    }
+
     fun thermalPath(c: Context): String = sp(c).getString("thermal_path", "") ?: ""
     fun setThermalPath(c: Context, v: String) { sp(c).edit().putString("thermal_path", v.trim()).apply() }
 

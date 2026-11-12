@@ -1,11 +1,11 @@
 package com.tvoshome.app
 
-import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
@@ -13,30 +13,98 @@ import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
-import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
 import android.text.format.DateFormat
-import android.util.Log
-import android.view.Display
+import android.util.DisplayMetrics
 import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
+import java.util.ArrayDeque
 import java.util.Calendar
 import java.util.Random
+
+/** Looks for the satellite parameters text "11258 V 30000" (symbol rate +-4) in any app's on-screen text. */
+object FreqScan {
+    private val RX = Regex("(\\d{4,5})\\D{0,3}([VvHh])\\D{0,3}(\\d{4,5})")
+    const val NONE = 0
+    const val OTHER = 1     // some other frequency line is on screen
+    const val TARGET = 2    // 11258 V 30000 (+-4) is on screen
+
+    private fun classify(t: CharSequence?): Int {
+        if (t == null || t.length < 9 || t.length > 300) return NONE
+        var res = NONE
+        for (m in RX.findAll(t)) {
+            val f = m.groupValues[1].toInt()
+            val p = m.groupValues[2]
+            val s = m.groupValues[3].toInt()
+            if (f == 11258 && (p == "V" || p == "v") && Math.abs(s - 30000) <= 4) return TARGET
+            if (f in 3000..14000 && s in 1000..60000) res = OTHER
+        }
+        return res
+    }
+
+    private fun free(n: AccessibilityNodeInfo) {
+        try { n.recycle() } catch (e: Exception) { }
+    }
+
+    /** Walks the window (max ~1500 nodes) and returns NONE / OTHER / TARGET. */
+    fun scan(root: AccessibilityNodeInfo): Int {
+        var best = NONE
+        var count = 0
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(root)
+        while (!stack.isEmpty()) {
+            val n = stack.removeLast()
+            if (count >= 1500) {
+                free(n)
+                continue
+            }
+            count++
+            var r = classify(n.text)
+            if (r < TARGET) {
+                val d = classify(n.contentDescription)
+                if (d > r) r = d
+            }
+            val cc = n.childCount
+            val sb = if (cc in 2..6) StringBuilder() else null
+            for (i in 0 until cc) {
+                val c = n.getChild(i) ?: continue
+                if (sb != null) {
+                    val ct = c.text
+                    if (ct != null && ct.isNotEmpty()) sb.append(ct).append(' ')
+                }
+                stack.add(c)
+            }
+            if (sb != null && sb.length > 8 && r < TARGET) {
+                val j = classify(sb)
+                if (j > r) r = j
+            }
+            if (r > best) best = r
+            if (n !== root) free(n)
+            if (best == TARGET) {
+                while (!stack.isEmpty()) free(stack.removeLast())
+                return TARGET
+            }
+        }
+        return best
+    }
+}
 
 /**
  * Optional cover for the channel logo (top-right corner).
  *
- * Nothing runs unless the option is on. A short watch starts only after a remote key press or an
- * app switch: it takes a few small screenshots (about every 0.7 s, max ~7 s) looking for the black
- * channel-switch screen; once the picture comes back it scans the top-right corner for a few
- * seconds for one of the 12 known logos. If found twice in a row, a cover (Connect logo / analog
- * clock / digital clock) is drawn over it, sized to the matched logo. Then everything goes idle.
- * Screenshots need Android 11+ (AccessibilityService.takeScreenshot).
+ * The accessibility service reports window changes; a throttled background scan (at most every
+ * ~0.7 s, and only while a change happened) reads the on-screen text. When "11258 V 30000" shows
+ * up anywhere, the cover (Connect logo / analog clock / digital clock) is drawn at the saved
+ * position and size. It goes away when another frequency line shows up or the app changes.
+ * Long press on the cover (or Settings -> Edit) lets you move and resize it; every change is saved.
  */
 class LogoCover(private val svc: KeyService) {
     private val ctx: Context = svc.applicationContext
@@ -45,33 +113,30 @@ class LogoCover(private val svc: KeyService) {
     private var worker: Handler? = null
 
     @Volatile private var enabled = false
+    @Volatile private var scanPending = false
+    private var lastScan = 0L
     private var style = 0
 
-    // UI-thread state
     private var view: CoverView? = null
     private var attached = false
     private var active = false
-    private var rect = IntArray(4)
-    private var lastPkg: String? = null
+    private var preview = false
+    @Volatile var editing = false
+    private var sizeMode = false
     private var coverPkg: String? = null
-    private var lastArm = 0L
+    private var otherCount = 0
+    private var rect = IntArray(4)
+    private var sw = 1920
+    private var sh = 1080
 
-    // worker-thread state
-    private var state = 0            // 0 idle, 1 waiting for the black screen, 2 scanning for the logo
-    private var deadline = 0L
-    private var sawBlack = false
-    private var hits = 0
-    private var lastHit: LogoMatch? = null
-    private var ticking = false
-    private var failures = 0
-
-    private val tickRun = Runnable { tick() }
+    private val stopEditRun = Runnable { if (editing) stopEdit() }
 
     fun configure() {
-        enabled = Prefs.logoOn(ctx) && Build.VERSION.SDK_INT >= 30
+        enabled = Prefs.logoOn(ctx)
         style = Prefs.logoStyle(ctx)
         if (!enabled) {
             stopWorker()
+            if (editing) stopEdit()
             hideCover()
             return
         }
@@ -82,228 +147,225 @@ class LogoCover(private val svc: KeyService) {
             worker = Handler(t.looper)
         }
         view?.setStyle(style)
-        if (active) layoutCover()
+        requestScan()
     }
 
     fun shutdown() {
         enabled = false
         stopWorker()
+        editing = false
         hideCover()
     }
 
     private fun stopWorker() {
-        val w = worker
-        w?.post { state = 0; ticking = false; w.removeCallbacks(tickRun) }
         thread?.quitSafely()
         thread = null
         worker = null
+        scanPending = false
     }
 
-    // ------------------------------------------------------------------ triggers (UI thread)
+    // ------------------------------------------------------------------ scanning
 
-    fun onKey() {
-        arm()
+    private fun ignored(pkg: String): Boolean =
+        pkg == ctx.packageName || pkg == "com.android.systemui" || pkg.contains("inputmethod") || pkg.contains("keyboard")
+
+    fun onContent(pkg: String?) {
+        if (!enabled || pkg == null || ignored(pkg)) return
+        requestScan()
     }
 
     fun onWindow(pkg: String?) {
-        if (!enabled || pkg == null) return
-        if (pkg == ctx.packageName || pkg == "com.android.systemui" ||
-            pkg.contains("inputmethod") || pkg.contains("keyboard")) return
-        if (active && coverPkg != null && pkg != coverPkg) hideCover()
-        lastPkg = pkg
-        arm()
+        if (!enabled || pkg == null || ignored(pkg)) return
+        if (active && !preview && !editing && coverPkg != null && pkg != coverPkg) hideCover()
+        requestScan()
+    }
+
+    private fun requestScan() {
+        val w = worker ?: return
+        if (scanPending) return
+        scanPending = true
+        val wait = maxOf(0L, 700L - (SystemClock.elapsedRealtime() - lastScan))
+        w.postDelayed({
+            scanPending = false
+            lastScan = SystemClock.elapsedRealtime()
+            doScan()
+        }, wait)
+    }
+
+    private fun doScan() {
+        if (!enabled || editing) return
+        val m = svc.mode
+        if (m == "full" || m == "standby" || m == "prompt") return
+        val root = try { svc.rootInActiveWindow } catch (e: Exception) { null } ?: return
+        val pkg = root.packageName?.toString()
+        if (pkg == null || ignored(pkg)) {
+            try { root.recycle() } catch (e: Exception) { }
+            return
+        }
+        val res = try { FreqScan.scan(root) } catch (e: Exception) { FreqScan.NONE }
+        ui.post { handle(res, pkg) }
+    }
+
+    private fun handle(res: Int, pkg: String) {
+        if (!enabled || editing) return
+        if (res == FreqScan.TARGET) {
+            otherCount = 0
+            if (!active) {
+                coverPkg = pkg
+                preview = false
+                showCover()
+            }
+        } else if (res == FreqScan.OTHER) {
+            if (active && !preview) {
+                otherCount++
+                if (otherCount >= 2) hideCover()
+            }
+        }
     }
 
     fun onMode(m: String) {
         if (!active) return
+        if (editing) return
         if (m == "full" || m == "standby" || m == "prompt") detachView() else attachView()
     }
 
-    private fun arm() {
-        if (!enabled) return
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastArm < 1200L) return
-        lastArm = now
-        val w = worker ?: return
-        w.post {
-            state = 1
-            deadline = SystemClock.elapsedRealtime() + 7000L
-            sawBlack = false
-            hits = 0
-            lastHit = null
-            if (!ticking) {
-                ticking = true
-                w.post(tickRun)
+    // ------------------------------------------------------------------ geometry
+
+    private fun loadRect() {
+        val dm = DisplayMetrics()
+        (ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
+        sw = dm.widthPixels
+        sh = dm.heightPixels
+        val f = Prefs.logoRect(ctx)
+        rect = intArrayOf((f[0] * sw).toInt(), (f[1] * sh).toInt(), ((f[0] + f[2]) * sw).toInt(), ((f[1] + f[3]) * sh).toInt())
+        clampRect()
+    }
+
+    private fun clampRect() {
+        val minW = (sw * 0.04f).toInt()
+        val minH = (sh * 0.04f).toInt()
+        if (rect[2] - rect[0] < minW) rect[0] = rect[2] - minW
+        if (rect[3] - rect[1] < minH) rect[3] = rect[1] + minH
+        if (rect[0] < 0) rect[0] = 0
+        if (rect[1] < 0) rect[1] = 0
+        if (rect[2] > sw) rect[2] = sw
+        if (rect[3] > sh) rect[3] = sh
+    }
+
+    private fun saveRect() {
+        Prefs.setLogoRect(ctx, floatArrayOf(rect[0] / sw.toFloat(), rect[1] / sh.toFloat(),
+            (rect[2] - rect[0]) / sw.toFloat(), (rect[3] - rect[1]) / sh.toFloat()))
+    }
+
+    fun resetRect() {
+        Prefs.resetLogoRect(ctx)
+        loadRect()
+        layoutCover()
+    }
+
+    /** Move (resize=false) or resize (resize=true: the left and bottom edges move) by a pixel delta. */
+    fun dragBy(dx: Int, dy: Int, resize: Boolean) {
+        if (resize) {
+            rect[0] += dx
+            rect[3] += dy
+        } else {
+            val w = rect[2] - rect[0]
+            val h = rect[3] - rect[1]
+            val nx = (rect[0] + dx).coerceIn(0, maxOf(0, sw - w))
+            val ny = (rect[1] + dy).coerceIn(0, maxOf(0, sh - h))
+            rect[0] = nx
+            rect[1] = ny
+            rect[2] = nx + w
+            rect[3] = ny + h
+        }
+        clampRect()
+        layoutCover()
+        postEditTimeout()
+    }
+
+    fun commit() {
+        saveRect()
+    }
+
+    // ------------------------------------------------------------------ edit mode
+
+    fun toggleEdit() {
+        if (editing) stopEdit() else startEdit()
+    }
+
+    fun startEdit() {
+        if (!enabled || editing) return
+        loadRect()
+        if (!active) {
+            preview = true
+            active = true
+            coverPkg = null
+        }
+        ensureView()
+        editing = true
+        sizeMode = false
+        view?.setEditing(true, false)
+        attachView()
+        postEditTimeout()
+    }
+
+    fun stopEdit() {
+        editing = false
+        ui.removeCallbacks(stopEditRun)
+        view?.setEditing(false, false)
+        saveRect()
+        if (preview) {
+            preview = false
+            hideCover()
+        } else {
+            val m = svc.mode
+            if (m == "full" || m == "standby" || m == "prompt") detachView() else layoutCover()
+        }
+    }
+
+    private fun postEditTimeout() {
+        if (!editing) return
+        ui.removeCallbacks(stopEditRun)
+        ui.postDelayed(stopEditRun, 25000L)
+    }
+
+    /** Remote control while editing: arrows move / resize, OK switches move<->size, BACK finishes. */
+    fun onEditKey(e: KeyEvent): Boolean {
+        if (e.action == KeyEvent.ACTION_UP) {
+            if (e.keyCode == KeyEvent.KEYCODE_BACK || e.keyCode == KeyEvent.KEYCODE_ESCAPE) stopEdit()
+            return true
+        }
+        val step = maxOf(3, (sw * 0.004f * (1 + minOf(e.repeatCount, 18) / 3)).toInt())
+        when (e.keyCode) {
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> if (e.repeatCount == 0) {
+                sizeMode = !sizeMode
+                view?.setEditing(true, sizeMode)
+                postEditTimeout()
             }
+            KeyEvent.KEYCODE_DPAD_LEFT -> { dragBy(-step, 0, sizeMode); saveRect() }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> { dragBy(step, 0, sizeMode); saveRect() }
+            KeyEvent.KEYCODE_DPAD_UP -> { dragBy(0, -step, sizeMode); saveRect() }
+            KeyEvent.KEYCODE_DPAD_DOWN -> { dragBy(0, step, sizeMode); saveRect() }
+            KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> { }
         }
-    }
-
-    // ------------------------------------------------------------------ worker
-
-    private fun tick() {
-        val w = worker ?: return
-        if (state == 0 || !enabled) {
-            ticking = false
-            return
-        }
-        if (SystemClock.elapsedRealtime() > deadline) {
-            state = 0
-            ticking = false
-            return
-        }
-        if (Build.VERSION.SDK_INT < 30) {
-            state = 0
-            ticking = false
-            return
-        }
-        shoot(w)
-    }
-
-    private fun shoot(w: Handler) {
-        try {
-            svc.takeScreenshot(Display.DEFAULT_DISPLAY, { r -> w.post(r) }, object : AccessibilityService.TakeScreenshotCallback {
-                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
-                    var bmp: Bitmap? = null
-                    try {
-                        val hb = result.hardwareBuffer
-                        val hw = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
-                        if (hw != null) {
-                            bmp = hw.copy(Bitmap.Config.ARGB_8888, false)
-                            hw.recycle()
-                        }
-                        hb.close()
-                    } catch (e: Exception) {
-                    }
-                    failures = 0
-                    if (bmp != null) {
-                        try { onFrame(bmp) } catch (e: Exception) { Log.d("LogoCover", "frame error " + e) }
-                        bmp.recycle()
-                    }
-                    next(700L)
-                }
-
-                override fun onFailure(errorCode: Int) {
-                    failures++
-                    if (failures >= 4) {
-                        state = 0
-                        ticking = false
-                    } else {
-                        next(1500L)
-                    }
-                }
-            })
-        } catch (e: Exception) {
-            state = 0
-            ticking = false
-        }
-    }
-
-    private fun next(delay: Long) {
-        val w = worker ?: return
-        if (state == 0) {
-            ticking = false
-            return
-        }
-        w.postDelayed(tickRun, delay)
-    }
-
-    private fun isDark(b: Bitmap): Boolean {
-        val sw = 48
-        val sh = 27
-        val s = Bitmap.createScaledBitmap(b, sw, sh, true)
-        val px = IntArray(sw * sh)
-        s.getPixels(px, 0, sw, 0, 0, sw, sh)
-        if (s !== b) s.recycle()
-        var dark = 0
-        var total = 0
-        for (y in 0 until sh) for (x in 0 until sw) {
-            if (x >= 26 && y < 9) continue     // top-right corner (where the logo / our cover is)
-            total++
-            val p = px[y * sw + x]
-            val l = (((p shr 16) and 0xFF) * 77 + ((p shr 8) and 0xFF) * 151 + (p and 0xFF) * 28) shr 8
-            if (l < 26) dark++
-        }
-        return total > 0 && dark >= total * 0.9f
-    }
-
-    private fun onFrame(b: Bitmap) {
-        val now = SystemClock.elapsedRealtime()
-        val dark = isDark(b)
-        if (state == 1) {
-            if (dark) {
-                if (!sawBlack) {
-                    sawBlack = true
-                    ui.post { hideCover() }
-                }
-                deadline = maxOf(deadline, now + 9000L)
-            } else if (sawBlack) {
-                state = 2
-                deadline = now + 12000L
-                hits = 0
-                lastHit = null
-                scan(b)
-            }
-        } else if (state == 2) {
-            if (dark) {
-                state = 1
-                sawBlack = true
-                deadline = now + 9000L
-                ui.post { hideCover() }
-            } else {
-                scan(b)
-            }
-        }
-    }
-
-    private fun scan(b: Bitmap) {
-        val sw = b.width
-        val sh = b.height
-        val x0 = (sw * 0.5f).toInt()
-        val rw = sw - x0
-        val rh = (sh * 0.30f).toInt()
-        if (rw < 50 || rh < 20) return
-        val k = LogoDetector.RW.toFloat() / rw
-        val rhS = maxOf(20, (rh * k).toInt())
-        val crop = Bitmap.createBitmap(b, x0, 0, rw, rh)
-        val sc = Bitmap.createScaledBitmap(crop, LogoDetector.RW, rhS, true)
-        val px = IntArray(LogoDetector.RW * rhS)
-        sc.getPixels(px, 0, LogoDetector.RW, 0, 0, LogoDetector.RW, rhS)
-        if (sc !== crop) sc.recycle()
-        crop.recycle()
-        val f = LogoDetector.features(px, LogoDetector.RW, rhS)
-        val m = LogoDetector.detect(ctx, f, LogoDetector.RW, rhS)
-        if (m == null || m.score < 0.55f) {
-            hits = 0
-            lastHit = null
-            return
-        }
-        val lh = lastHit
-        val near = lh != null && Math.abs(lh.x - m.x) <= m.w / 5 && Math.abs(lh.y - m.y) <= m.h / 5
-        hits = if (near) hits + 1 else 1
-        lastHit = m
-        Log.d("LogoCover", "candidate tpl=" + (m.tpl + 1) + " score=" + m.score + " hits=" + hits)
-        if (hits >= 2 || m.score >= 0.8f) {
-            state = 0
-            val e = LogoDetector.extend(m)
-            val padX = 0.04f * (e[2] - e[0])
-            val padY = 0.08f * (e[3] - e[1])
-            val l = maxOf(0, (x0 + (e[0] - padX) / k).toInt())
-            val t = maxOf(0, ((e[1] - padY) / k).toInt())
-            val r = minOf(sw, (x0 + (e[2] + padX) / k).toInt())
-            val bt = minOf(sh, ((e[3] + padY) / k).toInt())
-            ui.post { showCover(l, t, r, bt) }
-        }
+        return true
     }
 
     // ------------------------------------------------------------------ cover window (UI thread)
 
-    private fun showCover(l: Int, t: Int, r: Int, b: Int) {
-        if (!enabled || r - l < 20 || b - t < 12) return
-        rect = intArrayOf(l, t, r, b)
-        coverPkg = lastPkg
-        active = true
-        if (view == null) view = CoverView(ctx, style)
+    private fun ensureView() {
+        if (view == null) {
+            val v = CoverView(ctx, style)
+            v.host = this
+            view = v
+        }
         view?.setStyle(style)
+    }
+
+    private fun showCover() {
+        loadRect()
+        active = true
+        ensureView()
         val m = svc.mode
         if (m == "full" || m == "standby" || m == "prompt") return
         attachView()
@@ -315,7 +377,7 @@ class LogoCover(private val svc: KeyService) {
             rect[3] - rect[1],
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
@@ -363,13 +425,88 @@ class LogoCover(private val svc: KeyService) {
 
     fun hideCover() {
         active = false
+        preview = false
         coverPkg = null
+        otherCount = 0
         detachView()
     }
 }
 
 /** The drawn cover: Connect logo with random lively effects, or an analog / digital clock. */
 class CoverView(context: Context, private var style: Int) : View(context) {
+    var host: LogoCover? = null
+    private var editing = false
+    private var sizeMode = false
+    private var lx = 0f
+    private var ly = 0f
+    private var sx = 0f
+    private var sy = 0f
+    private var moved = false
+    private var resizing = false
+    private val density = context.resources.displayMetrics.density
+    private val editPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val longRun = Runnable { host?.toggleEdit() }
+
+    fun setEditing(on: Boolean, size: Boolean) {
+        editing = on
+        sizeMode = size
+        invalidate()
+    }
+
+    private fun handleSize(): Float = maxOf(28f * density, minOf(width, height) * 0.22f)
+
+    override fun onTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                lx = ev.rawX; ly = ev.rawY; sx = lx; sy = ly
+                moved = false
+                val hs = handleSize()
+                resizing = editing && ev.x < hs && ev.y > height - hs
+                postDelayed(longRun, 650L)
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (Math.abs(ev.rawX - sx) > 16f * density || Math.abs(ev.rawY - sy) > 16f * density) {
+                    moved = true
+                    removeCallbacks(longRun)
+                }
+                if (editing && moved) {
+                    val dx = (ev.rawX - lx).toInt()
+                    val dy = (ev.rawY - ly).toInt()
+                    if (dx != 0 || dy != 0) {
+                        host?.dragBy(dx, dy, resizing)
+                        lx = ev.rawX
+                        ly = ev.rawY
+                    }
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(longRun)
+                if (editing && moved) host?.commit()
+                return true
+            }
+        }
+        return true
+    }
+
+    private fun drawEditOverlay(c: Canvas, w: Float, h: Float) {
+        editPaint.style = Paint.Style.STROKE
+        editPaint.strokeWidth = 2.5f * density
+        editPaint.color = Color.WHITE
+        editPaint.pathEffect = DashPathEffect(floatArrayOf(10f * density, 6f * density), 0f)
+        c.drawRect(2f * density, 2f * density, w - 2f * density, h - 2f * density, editPaint)
+        editPaint.pathEffect = null
+        editPaint.style = Paint.Style.FILL
+        editPaint.color = if (sizeMode) 0xFFFF9F0A.toInt() else 0xFF30D5C8.toInt()
+        val hs = handleSize()
+        val p = Path()
+        p.moveTo(0f, h - hs)
+        p.lineTo(hs, h)
+        p.lineTo(0f, h)
+        p.close()
+        c.drawPath(p, editPaint)
+    }
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val icon: Bitmap? = try {
         context.assets.open("logo_cover/connect.png").use { BitmapFactory.decodeStream(it) }
@@ -454,6 +591,7 @@ class CoverView(context: Context, private var style: Int) : View(context) {
             else -> drawConnect(c, w, h)
         }
         c.restore()
+        if (editing) drawEditOverlay(c, w, h)
     }
 
     private fun progress(): Float {

@@ -119,6 +119,18 @@ class KeyService : AccessibilityService() {
         logoConfig()
     }
 
+    /** Settings -> "Edit logo": close the cards and let the user move / resize the cover. */
+    fun logoEdit() {
+        ui.post {
+            showMode("hidden")
+            ui.postDelayed({ cover?.startEdit() }, 350L)
+        }
+    }
+
+    fun logoReset() {
+        ui.post { cover?.resetRect() }
+    }
+
     /** Applies the channel-logo cover option (settings changed or service started). */
     fun logoConfig() {
         ui.post {
@@ -129,7 +141,12 @@ class KeyService : AccessibilityService() {
 
     /** HOME pressed while StandBy / prompt is showing -> leave it (HOME never reaches onKeyEvent). */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        if (event == null) return
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            cover?.onContent(event.packageName?.toString())
+            return
+        }
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         cover?.onWindow(event.packageName?.toString())
         if (mode != "standby" && mode != "prompt") return
         if (SystemClock.elapsedRealtime() - standbyAt < 2500L) return
@@ -481,10 +498,9 @@ class KeyService : AccessibilityService() {
     }
 
     override fun onKeyEvent(e: KeyEvent): Boolean {
-        if (e.action == KeyEvent.ACTION_DOWN) {
-            lastInput = SystemClock.elapsedRealtime()
-            if (e.repeatCount == 0 && e.keyCode != Prefs.keyCode(this) && (mode == "hidden" || mode == "toast")) cover?.onKey()
-        }
+        val cv = cover
+        if (cv != null && cv.editing) return cv.onEditKey(e)
+        if (e.action == KeyEvent.ACTION_DOWN) lastInput = SystemClock.elapsedRealtime()
         if (learning) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {
                 learning = false

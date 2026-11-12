@@ -102,7 +102,8 @@ class Bridge(private val svc: KeyService) {
         Prefs.setLogo(ctx, on, style)
         svc.logoConfig()
     }
-    @JavascriptInterface fun logoSupported(): Boolean = android.os.Build.VERSION.SDK_INT >= 30
+    @JavascriptInterface fun logoEdit() { svc.logoEdit() }
+    @JavascriptInterface fun logoReset() { svc.logoReset() }
 
     @JavascriptInterface fun resetWebView() { svc.rebuild() }
 
