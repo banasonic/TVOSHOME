@@ -42,53 +42,79 @@ class MatchData(
 )
 
 object MatchParse {
-    private val SCORE = Regex("^(.{2,40}?)\\s+(\\d{1,2})\\s*[-–—:]\\s*(\\d{1,2})\\s+(.{2,40})$")
-    private val VS = Regex("^(.{2,40}?)\\s+(?:vs\\.?|v|x|-|–|—|ضد|נגד|против|contro|gegen|contre|tegen)\\s+(.{2,40})$", RegexOption.IGNORE_CASE)
+    private val RANGE = Regex("\\d{1,2}[:.]\\d{2}\\s*[-–—~]+\\s*\\d{1,2}[:.]\\d{2}")
+    private val TIME = Regex("\\b\\d{1,2}[:.]\\d{2}\\b")
+    private val DATE = Regex("\\b\\d{1,2}[/.]\\d{1,2}(?:[/.]\\d{2,4})?\\b")
+    private val PAREN = Regex("[(\\[][^)\\]]{0,30}[)\\]]")
+    private val NOISE = Regex("(?iu)(?<![\\p{L}])(?:live!?|now|next|hd|fhd|uhd|sd|direct|en direct|en vivo|ao vivo|dal vivo|u[žz]ivo|ישיר|שידור חי|مباشر|بث مباشر|replay|rerun|premiere|new)(?![\\p{L}])")
+    private val SYM = Regex("[^\\p{L}\\p{N}\\s\\-–—:'’.&/]")
+    private val SEP = Regex("\\s(?:vs\\.?|v|x|-|–|—|ضد|נגד|против|contro|gegen|contre|tegen)\\s", RegexOption.IGNORE_CASE)
+    private val SCORE = Regex("\\s\\d{1,2}\\s*[-–—:]\\s*\\d{1,2}\\s")
     private val FREQ = Regex("\\d{4,5}\\D{0,6}[VvHh]\\D{0,6}\\d{4,5}")
-    private val CLOCK = Regex("^\\d{1,2}:\\d{2}\\s+")
-    private val MINUTE = Regex("\\s+\\d{1,3}['’′]?(\\+\\d+)?$")
+    private val SP = Regex("\\s+")
     private val NONLETTER = Regex("[^\\p{L}]")
 
     fun norm(s: String): String = NONLETTER.replace(s.lowercase(), "")
 
-    private fun side(s0: String): String? {
-        var s = s0.trim().trim('-', '–', '—', ':', '|', '(', ')', '[', ']')
-        s = MINUTE.replace(s, "").trim()
-        if (s.length < 2 || s.length > 40) return null
+    /** Keeps the last (left side) or first (right side) few words of one side of the separator. */
+    private fun clean(part: String, left: Boolean): String? {
+        var t = part.trim()
+        if (left && t.contains(':')) t = t.substringAfterLast(':')
+        t = t.trim('-', '–', '—', ':', '.', '&', '/', ' ', '\'', '’')
+        val w = t.split(' ').filter { it.isNotEmpty() }
+        if (w.isEmpty()) return null
+        val k = if (w.size > 5) 5 else w.size
+        t = (if (left) w.takeLast(k) else w.take(k)).joinToString(" ")
         var letters = 0
         var digits = 0
-        for (ch in s) { if (ch.isLetter()) letters++ else if (ch.isDigit()) digits++ }
-        if (letters < 2 || digits > 2) return null
-        return s
+        for (ch in t) { if (ch.isLetter()) letters++ else if (ch.isDigit()) digits++ }
+        if (letters < 2 || digits > 2 || t.length > 45) return null
+        return t
     }
 
-    /** "Inter 2-1 Milan", "Inter - Milan", "Inter vs Milan" ... -> two team names, or null. */
+    /**
+     * "21:35--23:45 Live! Czech Republic - Spain" -> ("Czech Republic", "Spain").
+     * Times, "Live", brackets and symbols are dropped in any language; whether the two names really are
+     * teams is decided later by [MatchLookup] (Wikidata), not here.
+     */
     fun parse(raw: String, r: Rect): TeamPair? {
         for (line0 in raw.split('\n')) {
-            var line = line0.trim()
-            if (line.length < 5 || FREQ.containsMatchIn(line)) continue
-            line = CLOCK.replace(line, "")
-            var a: String? = null
-            var b: String? = null
-            val m1 = SCORE.find(line)
-            if (m1 != null) {
-                a = side(m1.groupValues[1]); b = side(m1.groupValues[4])
-            } else {
-                val m2 = VS.find(line)
-                if (m2 != null) { a = side(m2.groupValues[1]); b = side(m2.groupValues[2]) }
-            }
-            if (a != null && b != null && norm(a) != norm(b)) return TeamPair(a, b, r)
+            if (line0.length < 5 || FREQ.containsMatchIn(line0)) continue
+            var s = RANGE.replace(line0, " ")
+            s = TIME.replace(s, " ")
+            s = DATE.replace(s, " ")
+            s = PAREN.replace(s, " ")
+            s = NOISE.replace(s, " ")
+            s = SYM.replace(s, " ")
+            s = " " + SP.replace(s, " ").trim() + " "
+            if (s.length < 7) continue
+            val sc = SCORE.find(s)
+            val parts: List<String> = if (sc != null) listOf(s.substring(0, sc.range.first), s.substring(sc.range.last + 1)) else SEP.split(s).filter { it.isNotBlank() }
+            if (parts.size < 2) continue
+            val a = clean(parts[parts.size - 2], true) ?: continue
+            val b = clean(parts[parts.size - 1], false) ?: continue
+            if (norm(a) == norm(b) || norm(a).isEmpty() || norm(b).isEmpty()) continue
+            return TeamPair(a, b, r)
         }
         return null
     }
 
-    fun hasFreq(t: String): Boolean = FREQ.containsMatchIn(t)
+    /** Shorter alternatives of a side (extra words can stick to it): left drops leading words, right drops trailing ones. */
+    fun variants(s: String, left: Boolean): List<String> {
+        val w = s.split(' ').filter { it.isNotEmpty() }
+        val out = ArrayList<String>()
+        for (i in 0..2) {
+            if (w.size - i < 1) break
+            out.add((if (left) w.drop(i) else w.take(w.size - i)).joinToString(" "))
+        }
+        return out
+    }
 }
 
 /** Resolves foreign team names to Arabic names + logos (Wikidata) and finds channel / commentator (kooora data). */
 object MatchLookup {
     private val UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-    private val FOOT = Regex("(?i)football|soccer|club|association|sports team|national|كرة|نادي|כדורגל|קבוצ|calcio|squadra|fu(ß|ss)ball|verein|voetbal|fudbal|клуб|фудбал|футбол|ποδοσφα|futbol|futebol|fútbol|équipe|équipe")
+    private val FOOT = Regex("(?i)football|soccer|كرة القدم|كرة قدم|כדורגל|calcio|calcist|fu(ß|ss)ball|voetbal|fudbal|фудбал|футбол|ποδοσφαιρ|futbol|fútbol|futebol|fotboll|fodbold|piłk|fotbal|nogomet|labdarúg|futbal|jalkapallo")
 
     fun http(url: String, maxBytes: Int = 900000): String? {
         return try {
@@ -157,32 +183,63 @@ object MatchLookup {
 
     class Team(val ar: String, val logoUrl: String)
 
-    /** Wikidata: name in any language -> (Arabic label, logo url). */
+    private fun enc(t: String): String = URLEncoder.encode(t, "UTF-8")
+
+    private fun search(q: String, lang: String): JSONArray? {
+        val r = http("https://www.wikidata.org/w/api.php?action=wbsearchentities&type=item&limit=7&format=json&language=" + lang +
+            "&uselang=" + lang + "&search=" + enc(q), 200000) ?: return null
+        return try { JSONObject(r).optJSONArray("search") } catch (e: Exception) { null }
+    }
+
+    private fun footId(arr: JSONArray?): String? {
+        if (arr == null) return null
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (FOOT.containsMatchIn(o.optString("description", ""))) return o.getString("id")
+        }
+        return null
+    }
+
+    private fun englishLabel(id: String): String? {
+        val r = http("https://www.wikidata.org/w/api.php?action=wbgetentities&props=labels&languages=en&format=json&ids=" + id, 100000) ?: return null
+        return try { JSONObject(r).getJSONObject("entities").getJSONObject(id).getJSONObject("labels").getJSONObject("en").getString("value") } catch (e: Exception) { null }
+    }
+
+    private fun entity(id: String, name: String): Team? {
+        val e = http("https://www.wikidata.org/w/api.php?action=wbgetentities&props=labels|claims&languages=ar|en&format=json&ids=" + id, 600000) ?: return null
+        return try {
+            val ent = JSONObject(e).getJSONObject("entities").getJSONObject(id)
+            val labels = ent.optJSONObject("labels")
+            val ar = labels?.optJSONObject("ar")?.optString("value", "") ?: ""
+            val en = labels?.optJSONObject("en")?.optString("value", "") ?: ""
+            var logo = ""
+            val p154 = ent.optJSONObject("claims")?.optJSONArray("P154")
+            if (p154 != null && p154.length() > 0) {
+                val f = p154.getJSONObject(0).optJSONObject("mainsnak")?.optJSONObject("datavalue")?.optString("value", "") ?: ""
+                if (f.isNotEmpty()) logo = "https://commons.wikimedia.org/wiki/Special:FilePath/" + enc(f).replace("+", "%20") + "?width=160"
+            }
+            Team(if (ar.isNotEmpty()) ar else if (en.isNotEmpty()) en else name, logo)
+        } catch (ex: Exception) { null }
+    }
+
+    /**
+     * Is [name] (any language) a football club or national team? Wikidata decides:
+     * a club is found by its description; a country name is mapped to "<country> national football team".
+     */
     fun team(name: String): Team? {
+        var firstId: String? = null
         for (lang in langsFor(name)) {
-            val q = http("https://www.wikidata.org/w/api.php?action=wbsearchentities&type=item&limit=7&format=json&language=" + lang +
-                "&uselang=" + lang + "&search=" + URLEncoder.encode(name, "UTF-8"), 200000) ?: continue
-            try {
-                val arr = JSONObject(q).optJSONArray("search") ?: continue
-                var id: String? = null
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    if (FOOT.containsMatchIn(o.optString("description", ""))) { id = o.getString("id"); break }
-                }
-                if (id == null) continue
-                val e = http("https://www.wikidata.org/w/api.php?action=wbgetentities&props=labels|claims&languages=ar|en&format=json&ids=" + id, 600000) ?: continue
-                val ent = JSONObject(e).getJSONObject("entities").getJSONObject(id)
-                val labels = ent.optJSONObject("labels")
-                val ar = labels?.optJSONObject("ar")?.optString("value", "") ?: ""
-                val en = labels?.optJSONObject("en")?.optString("value", "") ?: ""
-                var logo = ""
-                val p154 = ent.optJSONObject("claims")?.optJSONArray("P154")
-                if (p154 != null && p154.length() > 0) {
-                    val f = p154.getJSONObject(0).optJSONObject("mainsnak")?.optJSONObject("datavalue")?.optString("value", "") ?: ""
-                    if (f.isNotEmpty()) logo = "https://commons.wikimedia.org/wiki/Special:FilePath/" + URLEncoder.encode(f, "UTF-8").replace("+", "%20") + "?width=160"
-                }
-                return Team(if (ar.isNotEmpty()) ar else if (en.isNotEmpty()) en else name, logo)
-            } catch (e: Exception) { }
+            val arr = search(name, lang) ?: continue
+            val id = footId(arr)
+            if (id != null) return entity(id, name)
+            if (firstId == null && arr.length() > 0) firstId = arr.getJSONObject(0).getString("id")
+        }
+        if (firstId != null) {
+            val en = englishLabel(firstId)
+            if (en != null) {
+                val id = footId(search(en + " national football team", "en"))
+                if (id != null) return entity(id, name)
+            }
         }
         return null
     }
@@ -251,21 +308,31 @@ object MatchLookup {
         return m.groupValues[1].trim()
     }
 
-    /** Full resolution for a pair (blocking, network). */
-    fun resolve(ctx: Context, p: TeamPair): MatchData {
-        val ta = team(p.a)
-        val tb = team(p.b)
-        val arA = ta?.ar ?: p.a
-        val arB = tb?.ar ?: p.b
-        val k = if (ta != null && tb != null) kooraFind(ctx, arA, arB) else null
-        var nameA = arA
-        var nameB = arB
-        var logoA = ta?.logoUrl ?: ""
-        var logoB = tb?.logoUrl ?: ""
+    /** Full resolution for a pair (blocking, network). Null = the two names are not both football teams. */
+    fun resolve(ctx: Context, p: TeamPair, trace: StringBuilder? = null): MatchData? {
+        var ta: Team? = null
+        for (v in MatchParse.variants(p.a, true)) {
+            ta = team(v)
+            trace?.append(" [").append(v).append(if (ta != null) "=OK" else "=no").append("]")
+            if (ta != null) break
+        }
+        if (ta == null) return null
+        var tb: Team? = null
+        for (v in MatchParse.variants(p.b, false)) {
+            tb = team(v)
+            trace?.append(" [").append(v).append(if (tb != null) "=OK" else "=no").append("]")
+            if (tb != null) break
+        }
+        if (tb == null) return null
+        var nameA = ta.ar
+        var nameB = tb.ar
+        var logoA = ta.logoUrl
+        var logoB = tb.logoUrl
         var comp = ""
         var channel = ""
         var comm = ""
-        var src = if (ta != null || tb != null) "wikidata" else "screen"
+        var src = "wikidata"
+        val k = kooraFind(ctx, nameA, nameB)
         if (k != null) {
             nameA = if (k.swapped) k.a else k.h
             nameB = if (k.swapped) k.h else k.a
@@ -608,6 +675,8 @@ class MatchWatcher(private val svc: KeyService) {
         if (!enabled) { present = false; lastKey = ""; ui.post { card.shutdown() } }
     }
 
+    private val neg: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet<String>())
+
     /** Called on the scan thread with this scan's texts. */
     fun feed(texts: List<TextHit>, hasFreq: Boolean, sw: Int, sh: Int) {
         if (!enabled) return
@@ -619,6 +688,7 @@ class MatchWatcher(private val svc: KeyService) {
             var any: TeamPair? = null
             for (t in texts) {
                 val p = MatchParse.parse(t.t, t.r) ?: continue
+                if (neg.contains(p.key)) continue
                 if (anchorR != null && Rect.intersects(anchorR, t.r)) { found = p; break }
                 if (any == null) any = p
             }
@@ -626,46 +696,67 @@ class MatchWatcher(private val svc: KeyService) {
         }
         if (found == null) { present = false; return }
         val f = found
+        if (present && f.key == lastKey) return      // same info bar still on screen
+        val cached = synchronized(cache) { cache[f.key] }
+        if (cached != null) {
+            present = true
+            lastKey = f.key
+            rememberSpot(f, sw, sh)
+            ui.post { card.show(cached, 10000L) }
+            return
+        }
+        if (busyKey.isNotEmpty()) return              // one lookup at a time
+        busyKey = f.key
+        Thread {
+            val d = try { MatchLookup.resolve(ctx, f) } catch (e: Exception) { null }
+            busyKey = ""
+            if (d == null) {
+                neg.add(f.key)                        // not two football teams (or no network): don't ask again
+            } else {
+                synchronized(cache) { cache[f.key] = d }
+                present = true
+                lastKey = f.key
+                rememberSpot(f, sw, sh)
+                ui.post { card.show(d, 10000L) }
+            }
+        }.start()
+    }
+
+    private fun rememberSpot(f: TeamPair, sw: Int, sh: Int) {
         if (sw > 0 && sh > 0 && f.r.width() > 0) {
             val a = floatArrayOf(f.r.left / sw.toFloat(), f.r.top / sh.toFloat(), f.r.right / sw.toFloat(), f.r.bottom / sh.toFloat())
             anchor = a
             Prefs.setMatchAnchor(ctx, a)
         }
-        if (present && f.key == lastKey) return      // same info bar still on screen
-        present = true
-        lastKey = f.key
-        val cached = synchronized(cache) { cache[f.key] }
-        if (cached != null) { ui.post { card.show(cached, 10000L) }; return }
-        if (busyKey == f.key) return
-        busyKey = f.key
-        Thread {
-            val d = try { MatchLookup.resolve(ctx, f) } catch (e: Exception) { null }
-            busyKey = ""
-            if (d != null) {
-                synchronized(cache) { cache[f.key] = d }
-                if (lastKey == f.key) ui.post { card.show(d, 10000L) }
-            }
-        }.start()
     }
 
-    /** Settings "Match test": what was read and what the lookup returned. */
+    /** Settings "Match test": what was read, how it was cleaned, and what the lookup said. */
     fun test(texts: List<TextHit>, hasFreq: Boolean): String {
         val sb = StringBuilder()
         sb.append("freq-line=").append(hasFreq).append(" texts=").append(texts.size)
-        var p: TeamPair? = null
-        for (t in texts) { p = MatchParse.parse(t.t, t.r); if (p != null) break }
-        if (p == null) {
-            sb.append(" | no match line found. samples: ")
-            sb.append(texts.filter { it.t.length in 8..80 }.take(8).joinToString(" ; ") { it.t.replace('\n', ' ') })
+        val seen = HashSet<String>()
+        val pairs = ArrayList<TeamPair>()
+        for (t in texts) {
+            val p = MatchParse.parse(t.t, t.r) ?: continue
+            if (seen.add(p.key)) pairs.add(p)
+        }
+        if (pairs.isEmpty()) {
+            sb.append(" | no separator line found. samples: ")
+            sb.append(texts.filter { it.t.length in 8..90 }.take(8).joinToString(" ; ") { it.t.replace('\n', ' ') })
             return sb.toString()
         }
-        sb.append(" | teams: ").append(p.a).append(" / ").append(p.b)
-        val d = try { MatchLookup.resolve(ctx, p) } catch (e: Exception) { null }
-        if (d == null) { sb.append(" | lookup failed"); return sb.toString() }
-        sb.append(" | ").append(d.homeAr).append(" × ").append(d.awayAr)
-        sb.append(" | logos=").append(if (d.homeLogo != null) "1" else "0").append(if (d.awayLogo != null) "1" else "0")
-        sb.append(" ch=").append(d.channel).append(" comm=").append(d.commentator).append(" src=").append(d.src)
-        ui.post { card.show(d, 10000L) }
+        for (p in pairs.take(3)) {
+            sb.append(" | candidate: ").append(p.a).append(" / ").append(p.b)
+            val tr = StringBuilder()
+            val d = try { MatchLookup.resolve(ctx, p, tr) } catch (e: Exception) { null }
+            sb.append(tr)
+            if (d == null) { sb.append(" -> not football teams"); continue }
+            sb.append(" -> ").append(d.homeAr).append(" × ").append(d.awayAr)
+            sb.append(" logos=").append(if (d.homeLogo != null) "1" else "0").append(if (d.awayLogo != null) "1" else "0")
+            sb.append(" ch=").append(d.channel).append(" comm=").append(d.commentator).append(" src=").append(d.src)
+            ui.post { card.show(d, 10000L) }
+            break
+        }
         return sb.toString()
     }
 }
