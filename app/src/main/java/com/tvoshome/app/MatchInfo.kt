@@ -313,14 +313,14 @@ object MatchLookup {
         var ta: Team? = null
         for (v in MatchParse.variants(p.a, true)) {
             ta = team(v)
-            trace?.append(" [").append(v).append(if (ta != null) "=OK" else "=no").append("]")
+            if (trace != null) trace.append(" [").append(v).append(if (ta != null) "=OK" else "=no").append("]")
             if (ta != null) break
         }
         if (ta == null) return null
         var tb: Team? = null
         for (v in MatchParse.variants(p.b, false)) {
             tb = team(v)
-            trace?.append(" [").append(v).append(if (tb != null) "=OK" else "=no").append("]")
+            if (trace != null) trace.append(" [").append(v).append(if (tb != null) "=OK" else "=no").append("]")
             if (tb != null) break
         }
         if (tb == null) return null
