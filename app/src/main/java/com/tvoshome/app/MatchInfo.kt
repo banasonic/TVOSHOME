@@ -116,30 +116,49 @@ object MatchLookup {
     private val UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     private val FOOT = Regex("(?i)football|soccer|كرة القدم|كرة قدم|כדורגל|calcio|calcist|fu(ß|ss)ball|voetbal|fudbal|фудбал|футбол|ποδοσφαιρ|futbol|fútbol|futebol|fotboll|fodbold|piłk|fotbal|nogomet|labdarúg|futbal|jalkapallo")
 
+    @Volatile var lastErr = ""
+    private val WIKI_UA = "AppleMe/1.0 (Android TV app; football match info) Java"
+
     fun http(url: String, maxBytes: Int = 900000): String? {
-        return try {
-            val c = URL(url).openConnection() as HttpURLConnection
-            c.connectTimeout = 8000
-            c.readTimeout = 10000
-            c.instanceFollowRedirects = true
-            c.setRequestProperty("User-Agent", UA)
-            c.setRequestProperty("Accept-Language", "ar,en;q=0.8")
-            if (c.responseCode !in 200..299) { c.disconnect(); return null }
-            val out = java.io.ByteArrayOutputStream()
-            c.inputStream.use { ins ->
-                val buf = ByteArray(16384)
-                var total = 0
-                while (true) {
-                    val n = ins.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    total += n
-                    if (total > maxBytes) break
+        val ua = if (url.contains("wikidata.org") || url.contains("wikimedia.org")) WIKI_UA else UA
+        for (attempt in 0..1) {
+            try {
+                val c = URL(url).openConnection() as HttpURLConnection
+                c.connectTimeout = 8000
+                c.readTimeout = 10000
+                c.instanceFollowRedirects = true
+                c.setRequestProperty("User-Agent", ua)
+                c.setRequestProperty("Accept-Language", "ar,en;q=0.8")
+                val code = c.responseCode
+                if (code !in 200..299) {
+                    lastErr = "http " + code
+                    c.disconnect()
+                    if (code == 429 || code >= 500) {
+                        try { Thread.sleep(700) } catch (x: Exception) { }
+                        continue
+                    }
+                    return null
                 }
+                val out = java.io.ByteArrayOutputStream()
+                c.inputStream.use { ins ->
+                    val buf = ByteArray(16384)
+                    var total = 0
+                    while (true) {
+                        val n = ins.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        total += n
+                        if (total > maxBytes) break
+                    }
+                }
+                c.disconnect()
+                return out.toString("UTF-8")
+            } catch (e: Exception) {
+                lastErr = e.javaClass.simpleName
+                try { Thread.sleep(500) } catch (x: Exception) { }
             }
-            c.disconnect()
-            out.toString("UTF-8")
-        } catch (e: Exception) { null }
+        }
+        return null
     }
 
     fun bitmap(url: String): Bitmap? {
@@ -181,7 +200,7 @@ object MatchLookup {
         }
     }
 
-    class Team(val ar: String, val logoUrl: String)
+    class Team(val ar: String, val logoUrl: String, val src: String = "wikidata")
 
     private fun enc(t: String): String = URLEncoder.encode(t, "UTF-8")
 
@@ -222,24 +241,60 @@ object MatchLookup {
         } catch (ex: Exception) { null }
     }
 
+    private val WOMEN = setOf("w", "(w)", "women", "womens", "femenino", "féminin", "feminin", "femminile", "feminino", "נשים", "سيدات")
+
+    /** "Moldova U21" -> ("Moldova", " تحت 21"), "Spain W" -> ("Spain", " (سيدات)"). */
+    fun splitTag(name: String): Pair<String, String> {
+        val w = name.split(' ').filter { it.isNotEmpty() }.toMutableList()
+        var tag = ""
+        for (n in 0..1) {
+            if (w.size < 2) break
+            val last = w.last()
+            val low = last.lowercase()
+            if (Regex("^u-?\\d{2}$", RegexOption.IGNORE_CASE).matches(last)) {
+                tag = " تحت " + last.filter { it.isDigit() } + tag
+                w.removeAt(w.size - 1)
+            } else if (low in WOMEN) {
+                tag = " (سيدات)" + tag
+                w.removeAt(w.size - 1)
+            } else break
+        }
+        return Pair(w.joinToString(" "), tag)
+    }
+
     /**
-     * Is [name] (any language) a football club or national team? Wikidata decides:
-     * a club is found by its description; a country name is mapped to "<country> national football team".
+     * Is [name] (any language) a national team or a football club?
+     * 1) the built-in national-team list (instant, offline, with flag);
+     * 2) Wikidata: a club by its description; any language's country name -> its English name -> the list.
      */
-    fun team(name: String): Team? {
+    fun team(name0: String): Team? {
+        val sp = splitTag(name0)
+        val name = sp.first
+        val tag = sp.second
+        val nt = NationalTeams.find(name)
+        if (nt != null) return Team(nt.ar + tag, nt.flagUrl, "builtin")
         var firstId: String? = null
         for (lang in langsFor(name)) {
             val arr = search(name, lang) ?: continue
             val id = footId(arr)
-            if (id != null) return entity(id, name)
+            if (id != null) {
+                val t = entity(id, name)
+                if (t != null) return Team(t.ar + tag, t.logoUrl, "wikidata")
+            }
             if (firstId == null && arr.length() > 0) firstId = arr.getJSONObject(0).getString("id")
         }
         if (firstId != null) {
             val en = englishLabel(firstId)
             if (en != null) {
-                val id = footId(search(en + " national football team", "en"))
-                if (id != null) return entity(id, name)
+                val n2 = NationalTeams.find(en)
+                if (n2 != null) return Team(n2.ar + tag, n2.flagUrl, "wikidata>list")
             }
+        }
+        // short club names ("Inter", "Man City"): ask again with the word football club
+        val id2 = footId(search(name + " football club", "en"))
+        if (id2 != null) {
+            val t = entity(id2, name)
+            if (t != null) return Team(t.ar + tag, t.logoUrl, "wikidata")
         }
         return null
     }
@@ -312,15 +367,17 @@ object MatchLookup {
     fun resolve(ctx: Context, p: TeamPair, trace: StringBuilder? = null): MatchData? {
         var ta: Team? = null
         for (v in MatchParse.variants(p.a, true)) {
+            lastErr = ""
             ta = team(v)
-            if (trace != null) trace.append(" [").append(v).append(if (ta != null) "=OK" else "=no").append("]")
+            if (trace != null) trace.append(" [").append(v).append(if (ta != null) ("=OK(" + ta.src + ")") else ("=no " + lastErr)).append("]")
             if (ta != null) break
         }
         if (ta == null) return null
         var tb: Team? = null
         for (v in MatchParse.variants(p.b, false)) {
+            lastErr = ""
             tb = team(v)
-            if (trace != null) trace.append(" [").append(v).append(if (tb != null) "=OK" else "=no").append("]")
+            if (trace != null) trace.append(" [").append(v).append(if (tb != null) ("=OK(" + tb.src + ")") else ("=no " + lastErr)).append("]")
             if (tb != null) break
         }
         if (tb == null) return null
