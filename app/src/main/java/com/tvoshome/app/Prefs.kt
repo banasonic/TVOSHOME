@@ -57,7 +57,7 @@ object Prefs {
     fun setMatchOn(c: Context, on: Boolean) { sp(c).edit().putBoolean("match_on", on).apply() }
     fun matchRect(c: Context): FloatArray {
         val p = sp(c)
-        return floatArrayOf(p.getFloat("mt_fx", 0.76f), p.getFloat("mt_fy", 0.36f), p.getFloat("mt_fw", 0.22f), p.getFloat("mt_fh", 0.24f))
+        return floatArrayOf(p.getFloat("mt_fx", 0.70f), p.getFloat("mt_fy", 0.26f), p.getFloat("mt_fw", 0.28f), p.getFloat("mt_fh", 0.46f))
     }
     fun setMatchRect(c: Context, r: FloatArray) {
         sp(c).edit().putFloat("mt_fx", r[0]).putFloat("mt_fy", r[1]).putFloat("mt_fw", r[2]).putFloat("mt_fh", r[3]).apply()

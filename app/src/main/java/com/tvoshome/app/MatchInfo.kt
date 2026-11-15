@@ -6,6 +6,9 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
+import android.graphics.LinearGradient
+import android.graphics.Matrix
+import android.graphics.Shader
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -38,7 +41,10 @@ class TeamPair(val a: String, val b: String, val r: Rect) {
 class MatchData(
     val homeAr: String, val awayAr: String,
     val homeLogo: Bitmap?, val awayLogo: Bitmap?,
-    val comp: String, val channel: String, val commentator: String, val src: String
+    val homeFlag: Boolean, val awayFlag: Boolean,
+    val homeColor: Int, val awayColor: Int,
+    val comp: String, val channel: String, val commentator: String, val src: String,
+    val diag: String = ""
 )
 
 object MatchParse {
@@ -326,41 +332,125 @@ object MatchLookup {
 
     class KMatch(val h: String, val a: String, val hl: String, val al: String, val comp: String, val ch: List<String>, val url: String, val swapped: Boolean)
 
-    fun kooraFind(ctx: Context, arA: String, arB: String): KMatch? {
-        try { MatchesRepo.refresh(ctx, false) { } } catch (e: Exception) { }
-        val js = MatchesRepo.cached(ctx)
-        if (js.isEmpty()) return null
-        val arr: JSONArray = try { JSONObject(js).getJSONArray("m") } catch (e: Exception) { return null }
+    private fun loadKoora(ctx: Context): String {
+        var js = MatchesRepo.cached(ctx)
+        try { MatchesRepo.refresh(ctx, js.isEmpty()) { } } catch (e: Exception) { }
+        var waited = 0
+        while (js.isEmpty() && waited < 14000) {
+            try { Thread.sleep(500) } catch (e: Exception) { }
+            waited += 500
+            js = MatchesRepo.cached(ctx)
+        }
+        return js
+    }
+
+    fun kooraFind(ctx: Context, arA: String, arB: String, info: StringBuilder?): KMatch? {
+        val js = loadKoora(ctx)
+        if (js.isEmpty()) { info?.append("kooora: no data"); return null }
+        val arr: JSONArray = try { JSONObject(js).getJSONArray("m") } catch (e: Exception) { info?.append("kooora: bad data"); return null }
         var best: KMatch? = null
         var bestScore = 0f
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
             val h = o.optString("h")
             val a = o.optString("a")
-            val s1 = minOf(sim(h, arA), sim(a, arB))
-            val s2 = minOf(sim(h, arB), sim(a, arA))
-            val s = maxOf(s1, s2)
-            if (s >= 0.5f && s > bestScore) {
-                bestScore = s
+            val a1 = sim(h, arA)
+            val b1 = sim(a, arB)
+            val a2 = sim(h, arB)
+            val b2 = sim(a, arA)
+            val s1 = if (minOf(a1, b1) >= 0.34f) (a1 + b1) / 2f else 0f
+            val s2 = if (minOf(a2, b2) >= 0.34f) (a2 + b2) / 2f else 0f
+            val sc = maxOf(s1, s2)
+            if (sc >= 0.6f && sc > bestScore) {
+                bestScore = sc
                 val chA = o.optJSONArray("ch")
                 val ch = ArrayList<String>()
                 if (chA != null) for (k in 0 until chA.length()) ch.add(chA.getString(k))
                 best = KMatch(h, a, o.optString("hl"), o.optString("al"), o.optString("c"), ch, o.optString("u"), s2 > s1)
             }
         }
+        if (info != null) {
+            info.append("kooora: ").append(arr.length()).append(" matches, ")
+            if (best != null) info.append("found, ch=").append(best.ch.size) else info.append("no match for ").append(arA).append(" / ").append(arB)
+        }
         return best
     }
 
     private val TAG = Regex("<[^>]+>")
     private val SP = Regex("\\s+")
-    private val COMM = Regex("(?:المعلق(?:ون)?|معلق)\\s*[:：]?\\s*([\\u0600-\\u06FF]+(?:\\s+[\\u0600-\\u06FF]+){0,3})")
+    private val COMM_TXT = Regex("(?:المعلق(?:ون)?|معلق)\\s*[:：]?\\s*([\\p{L}][\\p{L}.'-]*(?:\\s+[\\p{L}][\\p{L}.'-]*){0,3})")
+    private val COMM_JSON = Regex("\"(?:commentators?|commentatorName|commentator_name|المعلق)\"\\s*:\\s*\"([^\"]{2,60})\"", RegexOption.IGNORE_CASE)
+
+    private fun encUrl(u: String): String = try {
+        val k = u.indexOf("://")
+        val rest = u.substring(k + 3)
+        val slash = rest.indexOf('/')
+        val host = if (slash < 0) rest else rest.substring(0, slash)
+        val path = if (slash < 0) "/" else rest.substring(slash)
+        java.net.URI(u.substring(0, k), host, path.substringBefore('?'), null).toASCIIString()
+    } catch (e: Exception) { u }
 
     fun commentator(url: String): String {
         if (url.isEmpty()) return ""
-        val h = http(url, 700000) ?: return ""
+        val h = http(encUrl(url), 900000) ?: return ""
+        val j = COMM_JSON.find(h)
+        if (j != null) return j.groupValues[1].trim()
         val t = SP.replace(TAG.replace(h, " "), " ")
-        val m = COMM.find(t) ?: return ""
+        val m = COMM_TXT.find(t) ?: return ""
         return m.groupValues[1].trim()
+    }
+
+    private val ARAB_CH = Regex("(?i)bein|بي ان|بى ان|ssc|الكأس|الكاس|أبوظبي|ابوظبي|abu dhabi|dubai|دبي|on time|mbc|الرياضية|arryadia|تلفزيون|alkass|الكاس|stc|tod|shahid|jazeera|الجزيرة")
+
+    private fun pickChannel(ch: List<String>): String {
+        for (c in ch) if (ARAB_CH.containsMatchIn(c)) return c
+        return ch.firstOrNull() ?: ""
+    }
+
+    /** Dominant (non white / non black) colour of a flag or crest, tuned to look good behind white text. */
+    fun dominant(b: Bitmap?, fallback: Int): Int {
+        if (b == null) return fallback
+        return try {
+            val w = minOf(b.width, 48)
+            val h = minOf(b.height, 48)
+            val sm = Bitmap.createScaledBitmap(b, w, h, true)
+            val px = IntArray(w * h)
+            sm.getPixels(px, 0, w, 0, 0, w, h)
+            if (sm !== b) sm.recycle()
+            val hsv = FloatArray(3)
+            val ws = FloatArray(12)
+            val rs = FloatArray(12)
+            val gs = FloatArray(12)
+            val bs = FloatArray(12)
+            for (p in px) {
+                if ((p ushr 24) < 200) continue
+                android.graphics.Color.colorToHSV(p, hsv)
+                if (hsv[1] < 0.4f || hsv[2] < 0.25f) continue
+                val bin = ((hsv[0] + 15f) / 30f).toInt() % 12
+                val wt = hsv[1] * hsv[2]
+                ws[bin] += wt
+                rs[bin] += android.graphics.Color.red(p) * wt
+                gs[bin] += android.graphics.Color.green(p) * wt
+                bs[bin] += android.graphics.Color.blue(p) * wt
+            }
+            var bi = 0
+            for (i in 1 until 12) if (ws[i] > ws[bi]) bi = i
+            if (ws[bi] < 2f) return fallback
+            val c = android.graphics.Color.rgb((rs[bi] / ws[bi]).toInt(), (gs[bi] / ws[bi]).toInt(), (bs[bi] / ws[bi]).toInt())
+            android.graphics.Color.colorToHSV(c, hsv)
+            hsv[1] = maxOf(hsv[1], 0.6f)
+            hsv[2] = hsv[2].coerceIn(0.5f, 0.8f)
+            android.graphics.Color.HSVToColor(hsv)
+        } catch (e: Exception) { fallback }
+    }
+
+    private fun hueDiff(a: Int, b: Int): Float {
+        val x = FloatArray(3)
+        val y = FloatArray(3)
+        android.graphics.Color.colorToHSV(a, x)
+        android.graphics.Color.colorToHSV(b, y)
+        val d = Math.abs(x[0] - y[0])
+        return if (d > 180f) 360f - d else d
     }
 
     /** Full resolution for a pair (blocking, network). Null = the two names are not both football teams. */
@@ -385,24 +475,35 @@ object MatchLookup {
         var nameB = tb.ar
         var logoA = ta.logoUrl
         var logoB = tb.logoUrl
+        var flagA = ta.src == "builtin" || ta.src == "wikidata>list"
+        var flagB = tb.src == "builtin" || tb.src == "wikidata>list"
         var comp = ""
         var channel = ""
         var comm = ""
         var src = "wikidata"
-        val k = kooraFind(ctx, nameA, nameB)
+        val info = StringBuilder()
+        val k = kooraFind(ctx, nameA, nameB, info)
         if (k != null) {
             nameA = if (k.swapped) k.a else k.h
             nameB = if (k.swapped) k.h else k.a
             val la = if (k.swapped) k.al else k.hl
             val lb = if (k.swapped) k.hl else k.al
-            if (la.isNotEmpty()) logoA = la
-            if (lb.isNotEmpty()) logoB = lb
+            if (la.isNotEmpty() && !flagA) logoA = la
+            if (lb.isNotEmpty() && !flagB) logoB = lb
             comp = k.comp
-            channel = k.ch.firstOrNull() ?: ""
+            channel = pickChannel(k.ch)
             comm = commentator(k.url)
+            info.append(", comm=").append(if (comm.isNotEmpty()) "yes" else "no")
             src += "+kooora"
         }
-        return MatchData(nameA, nameB, bitmap(logoA), bitmap(logoB), comp, channel, comm, src)
+        val bmA = bitmap(logoA)
+        val bmB = bitmap(logoB)
+        val colA = dominant(bmA, 0xFF1FA34A.toInt())
+        var colB = dominant(bmB, 0xFFB3261E.toInt())
+        if (hueDiff(colA, colB) < 25f) {
+            colB = if (hueDiff(colA, 0xFFB3261E.toInt()) < 40f) 0xFF1F4FD8.toInt() else 0xFFB3261E.toInt()
+        }
+        return MatchData(nameA, nameB, bmA, bmB, flagA, flagB, colA, colB, comp, channel, comm, src, info.toString())
     }
 }
 
@@ -532,7 +633,7 @@ class MatchCard(private val svc: KeyService) {
         loadRect()
         val v = view ?: MatchView(ctx).also { it.host = this; view = it }
         if (v.data == null) {
-            v.data = MatchData("الفريق الأول", "الفريق الثاني", null, null, "", "القناة الناقلة", "المعلق", "sample")
+            v.data = MatchData("الفريق الأول", "الفريق الثاني", null, null, false, false, 0xFF1FA34A.toInt(), 0xFFB3261E.toInt(), "", "القناة الناقلة", "اسم المعلق", "sample")
         }
         editing = true
         sizeMode = false
@@ -606,12 +707,12 @@ class MatchView(context: Context) : View(context) {
     private var resizing = false
     private val density = context.resources.displayMetrics.density
     private val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val clip = Path()
+    private val path = Path()
     private val longRun = Runnable { host?.toggleEdit() }
 
     fun setEditing(on: Boolean, size: Boolean) { editing = on; sizeMode = size; invalidate() }
 
-    private fun handleSize(): Float = maxOf(28f * density, minOf(width, height) * 0.2f)
+    private fun handleSize(): Float = maxOf(28f * density, minOf(width, height) * 0.16f)
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
@@ -641,10 +742,184 @@ class MatchView(context: Context) : View(context) {
         return true
     }
 
-    private fun fit(text: String, maxW: Float, size: Float) {
+    private fun shade(c: Int, f: Float): Int {
+        val r = (android.graphics.Color.red(c) * f).toInt().coerceIn(0, 255)
+        val g = (android.graphics.Color.green(c) * f).toInt().coerceIn(0, 255)
+        val b = (android.graphics.Color.blue(c) * f).toInt().coerceIn(0, 255)
+        return android.graphics.Color.rgb(r, g, b)
+    }
+
+    private fun poly(c: Canvas, pts: FloatArray, y1: Float, y2: Float, top: Int, bottom: Int, border: Int) {
+        path.reset()
+        path.moveTo(pts[0], pts[1])
+        var i = 2
+        while (i < pts.size) { path.lineTo(pts[i], pts[i + 1]); i += 2 }
+        path.close()
+        p.style = Paint.Style.FILL
+        p.shader = LinearGradient(0f, y1, 0f, y2, top, bottom, Shader.TileMode.CLAMP)
+        c.drawPath(path, p)
+        p.shader = null
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 1.6f * density
+        p.color = border
+        c.drawPath(path, p)
+        p.style = Paint.Style.FILL
+    }
+
+    private fun label(c: Canvas, t: String, cx: Float, cy: Float, maxW: Float, size: Float, color: Int, shadow: Boolean) {
+        if (t.isEmpty()) return
+        p.style = Paint.Style.FILL
+        p.textAlign = Paint.Align.CENTER
         p.textSize = size
-        val w = p.measureText(text)
-        if (w > maxW && w > 0f) p.textSize = size * maxW / w
+        val tw = p.measureText(t)
+        if (tw > maxW && tw > 0f) p.textSize = size * maxW / tw
+        p.color = color
+        if (shadow) p.setShadowLayer(3f * density, 0f, 1.5f * density, 0xAA000000.toInt())
+        c.drawText(t, cx, cy - (p.descent() + p.ascent()) / 2f, p)
+        p.clearShadowLayer()
+    }
+
+    private fun shield(c: Canvas, cx: Float, top: Float, sw: Float, sh: Float, logo: Bitmap?, isFlag: Boolean) {
+        fun build(scale: Float): Path {
+            val w = sw * scale
+            val h = sh * scale
+            val l = cx - w / 2f
+            val t = top + (sh - h) / 2f
+            val r = w * 0.16f
+            val pth = Path()
+            pth.moveTo(l, t + r)
+            pth.quadTo(l, t, l + r, t)
+            pth.lineTo(l + w - r, t)
+            pth.quadTo(l + w, t, l + w, t + r)
+            pth.lineTo(l + w, t + h * 0.58f)
+            pth.cubicTo(l + w, t + h * 0.82f, cx + w * 0.2f, t + h * 0.95f, cx, t + h)
+            pth.cubicTo(cx - w * 0.2f, t + h * 0.95f, l, t + h * 0.82f, l, t + h * 0.58f)
+            pth.close()
+            return pth
+        }
+        // soft shadow
+        p.style = Paint.Style.FILL
+        p.color = 0x55000000
+        c.drawOval(RectF(cx - sw * 0.38f, top + sh * 0.97f, cx + sw * 0.38f, top + sh * 1.05f), p)
+        // golden frame
+        val outer = build(1f)
+        p.shader = LinearGradient(0f, top, 0f, top + sh, intArrayOf(0xFFFFE082.toInt(), 0xFFFF9800.toInt(), 0xFFC24A00.toInt()), floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
+        c.drawPath(outer, p)
+        p.shader = null
+        // dark plate
+        val inner = build(0.86f)
+        p.shader = LinearGradient(0f, top, 0f, top + sh, 0xFF4A4A4F.toInt(), 0xFF111114.toInt(), Shader.TileMode.CLAMP)
+        c.drawPath(inner, p)
+        p.shader = null
+        c.save()
+        c.clipPath(inner)
+        if (logo != null) {
+            val bw = logo.width.toFloat()
+            val bh = logo.height.toFloat()
+            val iw = sw * 0.86f
+            val ih = sh * 0.86f
+            val l = cx - iw / 2f
+            val t = top + (sh - ih) / 2f
+            if (isFlag) {
+                val sc = maxOf(iw / bw, ih / bh)
+                val dw = bw * sc
+                val dh = bh * sc
+                c.drawBitmap(logo, null, RectF(cx - dw / 2f, t + ih / 2f - dh / 2f, cx + dw / 2f, t + ih / 2f + dh / 2f), p)
+            } else {
+                val sc = minOf(iw * 0.78f / bw, ih * 0.7f / bh)
+                val dw = bw * sc
+                val dh = bh * sc
+                c.drawBitmap(logo, null, RectF(cx - dw / 2f, t + ih * 0.46f - dh / 2f, cx + dw / 2f, t + ih * 0.46f + dh / 2f), p)
+            }
+        }
+        // gloss
+        p.shader = LinearGradient(0f, top, 0f, top + sh * 0.5f, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+        c.drawRect(cx - sw / 2f, top, cx + sw / 2f, top + sh * 0.5f, p)
+        p.shader = null
+        c.restore()
+    }
+
+    private fun ball(c: Canvas, cx: Float, cy: Float, r: Float) {
+        p.style = Paint.Style.FILL
+        p.color = 0x55000000
+        c.drawOval(RectF(cx - r * 0.9f, cy + r * 0.92f, cx + r * 0.9f, cy + r * 1.18f), p)
+        p.shader = LinearGradient(cx - r, cy - r, cx + r, cy + r, 0xFFFFFFFF.toInt(), 0xFFC9C9C9.toInt(), Shader.TileMode.CLAMP)
+        c.drawCircle(cx, cy, r, p)
+        p.shader = null
+        p.color = 0xFF1A1A1A.toInt()
+        path.reset()
+        for (i in 0 until 5) {
+            val a = Math.toRadians(-90.0 + i * 72.0)
+            val x = cx + (Math.cos(a) * r * 0.36).toFloat()
+            val y = cy + (Math.sin(a) * r * 0.36).toFloat()
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        path.close()
+        c.drawPath(path, p)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = maxOf(1f, r * 0.05f)
+        for (i in 0 until 5) {
+            val a = Math.toRadians(-90.0 + i * 72.0)
+            c.drawLine(cx + (Math.cos(a) * r * 0.36).toFloat(), cy + (Math.sin(a) * r * 0.36).toFloat(),
+                cx + (Math.cos(a) * r * 0.72).toFloat(), cy + (Math.sin(a) * r * 0.72).toFloat(), p)
+        }
+        p.style = Paint.Style.FILL
+        for (i in 0 until 5) {
+            val a = Math.toRadians(-54.0 + i * 72.0)
+            c.drawCircle(cx + (Math.cos(a) * r * 0.86).toFloat(), cy + (Math.sin(a) * r * 0.86).toFloat(), r * 0.2f, p)
+        }
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = maxOf(1.2f, r * 0.06f)
+        p.color = 0xFF2B2B2B.toInt()
+        c.drawCircle(cx, cy, r, p)
+        p.style = Paint.Style.FILL
+    }
+
+    private fun mic(c: Canvas, cx: Float, cy: Float, s: Float) {
+        p.style = Paint.Style.FILL
+        c.drawRoundRect(RectF(cx - 0.18f * s, cy - 0.5f * s, cx + 0.18f * s, cy + 0.1f * s), 0.18f * s, 0.18f * s, p)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = maxOf(1.5f, s * 0.09f)
+        p.strokeCap = Paint.Cap.ROUND
+        c.drawArc(RectF(cx - 0.32f * s, cy - 0.28f * s, cx + 0.32f * s, cy + 0.3f * s), 0f, 180f, false, p)
+        c.drawLine(cx, cy + 0.3f * s, cx, cy + 0.5f * s, p)
+        c.drawLine(cx - 0.18f * s, cy + 0.5f * s, cx + 0.18f * s, cy + 0.5f * s, p)
+        p.style = Paint.Style.FILL
+    }
+
+    private fun tv(c: Canvas, cx: Float, cy: Float, s: Float) {
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = maxOf(1.5f, s * 0.09f)
+        p.strokeCap = Paint.Cap.ROUND
+        c.drawRoundRect(RectF(cx - 0.5f * s, cy - 0.32f * s, cx + 0.5f * s, cy + 0.3f * s), 0.1f * s, 0.1f * s, p)
+        c.drawLine(cx - 0.1f * s, cy - 0.32f * s, cx - 0.28f * s, cy - 0.55f * s, p)
+        c.drawLine(cx + 0.1f * s, cy - 0.32f * s, cx + 0.28f * s, cy - 0.55f * s, p)
+        c.drawLine(cx - 0.25f * s, cy + 0.5f * s, cx + 0.25f * s, cy + 0.5f * s, p)
+        c.drawLine(cx, cy + 0.3f * s, cx, cy + 0.5f * s, p)
+        p.style = Paint.Style.FILL
+    }
+
+    private fun infoRow(c: Canvas, text: String, isMic: Boolean, cx: Float, cy: Float, maxW: Float, size: Float, dim: Boolean) {
+        p.textSize = size
+        p.textAlign = Paint.Align.CENTER
+        val iconW = size * 1.15f
+        var t = text
+        var ts = size
+        val avail = maxW - iconW
+        p.textSize = ts
+        val tw0 = p.measureText(t)
+        if (tw0 > avail && tw0 > 0f) { ts = size * avail / tw0; p.textSize = ts }
+        val tw = p.measureText(t)
+        val total = tw + iconW
+        val left = cx - total / 2f
+        // icon (gold) on the right, text next to it (RTL reading)
+        p.color = 0xFFFFC83D.toInt()
+        val icx = left + total - iconW / 2f
+        if (isMic) mic(c, icx, cy, size * 0.95f) else tv(c, icx, cy, size * 0.95f)
+        p.color = if (dim) 0xAAFFFFFF.toInt() else 0xFFFFFFFF.toInt()
+        p.textSize = ts
+        p.textAlign = Paint.Align.CENTER
+        c.drawText(t, left + tw / 2f, cy - (p.descent() + p.ascent()) / 2f, p)
     }
 
     override fun onDraw(c: Canvas) {
@@ -652,51 +927,67 @@ class MatchView(context: Context) : View(context) {
         val h = height.toFloat()
         if (w < 2f || h < 2f) return
         val d = data ?: return
-        val r = minOf(w, h) * 0.12f
-        clip.reset()
-        clip.addRoundRect(RectF(0f, 0f, w, h), r, r, Path.Direction.CW)
-        c.save()
-        c.clipPath(clip)
-        p.style = Paint.Style.FILL
-        p.color = 0xFFFFFFFF.toInt()
-        c.drawRect(0f, 0f, w, h, p)
-        val pad = w * 0.06f
         p.typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-        p.textAlign = Paint.Align.RIGHT
-        // top line: commentator + channel
-        var y = h * 0.14f
-        val top = ArrayList<String>()
-        if (d.commentator.isNotEmpty()) top.add("المعلق: " + d.commentator)
-        if (d.channel.isNotEmpty()) top.add(d.channel)
-        p.color = 0xFF3A3A3C.toInt()
-        if (top.isNotEmpty()) {
-            fit(top.joinToString(" · "), w - pad * 2, h * 0.095f)
-            c.drawText(top.joinToString(" · "), w - pad, y, p)
-        }
-        // divider
-        p.color = 0x22000000
-        c.drawRect(pad, h * 0.2f, w - pad, h * 0.2f + 2f * density, p)
-        // two team rows
-        val rowH = (h - h * 0.24f) / 2f
-        for (i in 0..1) {
-            val name = if (i == 0) d.homeAr else d.awayAr
-            val logo = if (i == 0) d.homeLogo else d.awayLogo
-            val cy = h * 0.22f + rowH * i + rowH / 2f
-            val ls = rowH * 0.78f
-            var textRight = w - pad
-            if (logo != null) {
-                c.drawBitmap(logo, null, RectF(w - pad - ls, cy - ls / 2f, w - pad, cy + ls / 2f), p)
-                textRight = w - pad - ls - pad * 0.6f
+
+        // ---- banners (home on the left, away on the right) with the VS piece between
+        val y0 = h * 0.07f
+        val bh = h * 0.15f
+        val bb = y0 + bh
+        poly(c, floatArrayOf(0f, y0, 0.47f * w, y0, 0.47f * w, bb, 0.035f * w, bb), y0, bb, shade(d.homeColor, 1.3f), shade(d.homeColor, 0.7f), 0x66FFFFFF)
+        poly(c, floatArrayOf(0.53f * w, y0, w, y0, 0.965f * w, bb, 0.53f * w, bb), y0, bb, shade(d.awayColor, 1.3f), shade(d.awayColor, 0.7f), 0x66FFFFFF)
+        poly(c, floatArrayOf(0.335f * w, y0 - 0.035f * h, 0.665f * w, y0 - 0.035f * h, 0.62f * w, bb + 0.035f * h, 0.38f * w, bb + 0.035f * h),
+            y0 - 0.035f * h, bb + 0.035f * h, 0xFFFFD21F.toInt(), 0xFFE04A00.toInt(), 0xFFFFE680.toInt())
+        val ty = y0 + bh / 2f
+        p.typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD_ITALIC)
+        label(c, "VS", 0.5f * w, ty, 0.2f * w, bh * 0.95f, 0xFFFFFFFF.toInt(), true)
+        p.typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        label(c, d.homeAr, 0.225f * w, ty, 0.30f * w, bh * 0.46f, 0xFFFFFFFF.toInt(), true)
+        label(c, d.awayAr, 0.775f * w, ty, 0.30f * w, bh * 0.46f, 0xFFFFFFFF.toInt(), true)
+
+        // ---- shields with the flags / crests and the ball between them
+        val shW = minOf(0.31f * w, h * 0.34f)
+        val shH = minOf(shW * 1.12f, h * 0.45f)
+        val shTop = bb + h * 0.075f
+        shield(c, 0.22f * w, shTop, shW, shH, d.homeLogo, d.homeFlag)
+        shield(c, 0.78f * w, shTop, shW, shH, d.awayLogo, d.awayFlag)
+        ball(c, 0.5f * w, shTop + shH * 0.5f, minOf(0.085f * w, shH * 0.22f))
+
+        // ---- commentator + channel panel
+        val pt = shTop + shH + h * 0.045f
+        val ph = h - pt - h * 0.015f
+        if (ph > h * 0.1f) {
+            val pl = w * 0.04f
+            val pr = w * 0.96f
+            path.reset()
+            path.addRoundRect(RectF(pl, pt, pr, pt + ph), ph * 0.25f, ph * 0.25f, Path.Direction.CW)
+            p.style = Paint.Style.FILL
+            p.shader = LinearGradient(0f, pt, 0f, pt + ph, 0xE61E1E26.toInt(), 0xE60A0A10.toInt(), Shader.TileMode.CLAMP)
+            c.drawPath(path, p)
+            p.shader = null
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = 1.4f * density
+            p.color = 0x80FFC83D.toInt()
+            c.drawPath(path, p)
+            p.style = Paint.Style.FILL
+            val hasComm = d.commentator.isNotEmpty()
+            val chText = if (d.channel.isNotEmpty()) d.channel else "لا توجد قناة ناقلة معلنة"
+            val maxW = (pr - pl) * 0.94f
+            val cx = w / 2f
+            if (hasComm) {
+                val rowH = ph / 2f
+                val sz = minOf(rowH * 0.5f, w * 0.055f)
+                infoRow(c, "المعلق: " + d.commentator, true, cx, pt + rowH * 0.5f, maxW, sz, false)
+                infoRow(c, chText, false, cx, pt + rowH * 1.5f, maxW, sz, d.channel.isEmpty())
+            } else {
+                val sz = minOf(ph * 0.34f, w * 0.06f)
+                infoRow(c, chText, false, cx, pt + ph / 2f, maxW, sz, d.channel.isEmpty())
             }
-            p.color = 0xFF1C1C1E.toInt()
-            fit(name, textRight - pad, rowH * 0.46f)
-            c.drawText(name, textRight, cy - (p.descent() + p.ascent()) / 2f, p)
         }
-        c.restore()
+
         if (editing) {
             p.style = Paint.Style.STROKE
             p.strokeWidth = 2.5f * density
-            p.color = 0xFF000000.toInt()
+            p.color = 0xFFFFFFFF.toInt()
             p.pathEffect = DashPathEffect(floatArrayOf(10f * density, 6f * density), 0f)
             c.drawRect(2f * density, 2f * density, w - 2f * density, h - 2f * density, p)
             p.pathEffect = null
@@ -810,7 +1101,7 @@ class MatchWatcher(private val svc: KeyService) {
             if (d == null) { sb.append(" -> not football teams"); continue }
             sb.append(" -> ").append(d.homeAr).append(" × ").append(d.awayAr)
             sb.append(" logos=").append(if (d.homeLogo != null) "1" else "0").append(if (d.awayLogo != null) "1" else "0")
-            sb.append(" ch=").append(d.channel).append(" comm=").append(d.commentator).append(" src=").append(d.src)
+            sb.append(" ch=").append(d.channel).append(" comm=").append(d.commentator).append(" src=").append(d.src).append(" | ").append(d.diag)
             ui.post { card.show(d, 10000L) }
             break
         }
