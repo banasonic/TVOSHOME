@@ -1,3 +1,6 @@
+import java.net.HttpURLConnection
+import java.net.URL
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -29,7 +32,7 @@ android {
 // OCR library (optional): use the first candidate that is really published on Maven Central.
 // If none is found the app still builds and only the "read video text" (OCR) feature is unavailable.
 fun urlExists(u: String): Boolean = try {
-    val c = java.net.URL(u).openConnection() as java.net.HttpURLConnection
+    val c = URL(u).openConnection() as HttpURLConnection
     c.requestMethod = "HEAD"
     c.connectTimeout = 8000
     c.readTimeout = 8000
