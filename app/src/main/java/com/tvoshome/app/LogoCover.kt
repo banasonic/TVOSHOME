@@ -63,11 +63,11 @@ object FreqScan {
         return res
     }
 
-    private fun free(n: AccessibilityNodeInfo) {
+    fun free(n: AccessibilityNodeInfo) {
         try { n.recycle() } catch (e: Exception) { }
     }
 
-    private fun roots(svc: AccessibilityService): List<AccessibilityNodeInfo> {
+    fun roots(svc: AccessibilityService): List<AccessibilityNodeInfo> {
         val out = ArrayList<AccessibilityNodeInfo>()
         try {
             val ws = svc.windows

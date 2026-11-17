@@ -72,6 +72,24 @@ object Prefs {
         sp(c).edit().putFloat("mt_ax", a[0]).putFloat("mt_ay", a[1]).putFloat("mt_az", a[2]).putFloat("mt_aw", a[3]).apply()
     }
 
+    fun transOn(c: Context): Boolean = sp(c).getBoolean("tr_on", false)
+    fun transSize(c: Context): Int = sp(c).getInt("tr_size", 2)
+    fun transColor(c: Context): Int = sp(c).getInt("tr_color", 0)
+    fun transBg(c: Context): Int = sp(c).getInt("tr_bg", 0)
+    fun transPoster(c: Context): Boolean = sp(c).getBoolean("tr_poster", true)
+    fun setTrans(c: Context, on: Boolean, size: Int, color: Int, bg: Int, poster: Boolean) {
+        sp(c).edit().putBoolean("tr_on", on).putInt("tr_size", size.coerceIn(0, 4)).putInt("tr_color", color.coerceIn(0, 3))
+            .putInt("tr_bg", bg.coerceIn(0, 2)).putBoolean("tr_poster", poster).apply()
+    }
+    fun transRect(c: Context): FloatArray? {
+        val p = sp(c)
+        if (!p.contains("tr_fx")) return null
+        return floatArrayOf(p.getFloat("tr_fx", 0.15f), p.getFloat("tr_fy", 0.78f), p.getFloat("tr_fw", 0.7f), p.getFloat("tr_fh", 0.12f))
+    }
+    fun setTransRect(c: Context, r: FloatArray) {
+        sp(c).edit().putFloat("tr_fx", r[0]).putFloat("tr_fy", r[1]).putFloat("tr_fw", r[2]).putFloat("tr_fh", r[3]).apply()
+    }
+
     fun resetLogoRect(c: Context) {
         sp(c).edit().remove("logo_fx").remove("logo_fy").remove("logo_fw").remove("logo_fh").apply()
     }

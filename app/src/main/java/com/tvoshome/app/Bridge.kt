@@ -109,6 +109,11 @@ class Bridge(private val svc: KeyService) {
         Prefs.setMatchOn(ctx, on)
         svc.logoConfig()
     }
+    @JavascriptInterface fun setTrans(on: Boolean, size: Int, color: Int, bg: Int, poster: Boolean) {
+        Prefs.setTrans(ctx, on, size, color, bg, poster)
+        svc.logoConfig()
+    }
+    @JavascriptInterface fun transPlace() { svc.transPlace() }
     @JavascriptInterface fun matchEdit() { svc.matchEdit() }
     @JavascriptInterface fun matchReset() { svc.matchReset() }
     @JavascriptInterface fun matchTest() { svc.matchTestLater() }

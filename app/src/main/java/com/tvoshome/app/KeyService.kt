@@ -57,6 +57,7 @@ class KeyService : AccessibilityService() {
     private var shownAt = 0L
     private var cover: LogoCover? = null
     private var matchW: MatchWatcher? = null
+    private var trans: ScreenTranslator? = null
 
     /** Matches are fetched on a schedule in the background (never while the cards are open). */
     private val matchRun = object : Runnable {
@@ -144,6 +145,11 @@ class KeyService : AccessibilityService() {
         }
     }
 
+    /** Settings: (re)place the translation box. */
+    fun transPlace() {
+        ui.post { trans?.startPlace() }
+    }
+
     fun matchOn(): Boolean = matchW?.enabled == true
 
     fun matchFeed(texts: List<TextHit>, hasFreq: Boolean, sw: Int, sh: Int) {
@@ -196,6 +202,8 @@ class KeyService : AccessibilityService() {
             m.configure()
             val c = cover ?: LogoCover(this).also { cover = it }
             c.configure()
+            val t = trans ?: ScreenTranslator(this).also { trans = it }
+            t.configure()
         }
     }
 
@@ -204,6 +212,7 @@ class KeyService : AccessibilityService() {
         if (event == null) return
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
             cover?.onContent(event.packageName?.toString())
+            trans?.onChange()
             return
         }
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
@@ -226,6 +235,7 @@ class KeyService : AccessibilityService() {
         ui.post {
             cover?.shutdown()
             matchW?.card?.shutdown()
+            trans?.shutdown()
             detach()
         }
         return super.onUnbind(intent)
@@ -404,6 +414,7 @@ class KeyService : AccessibilityService() {
         }
         cover?.onMode(mode)
         matchW?.card?.onMode(mode)
+        trans?.onMode(mode)
     }
 
     fun toggle() {
@@ -564,6 +575,8 @@ class KeyService : AccessibilityService() {
         if (cv != null && cv.editing) return cv.onEditKey(e)
         val mcard = matchW?.card
         if (mcard != null && mcard.editing) return mcard.onEditKey(e)
+        val tr = trans
+        if (tr != null && tr.placing) return tr.onPlaceKey(e)
         if (e.action == KeyEvent.ACTION_DOWN) lastInput = SystemClock.elapsedRealtime()
         if (learning) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {
