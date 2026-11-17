@@ -741,7 +741,7 @@ class ScreenTranslator(private val svc: KeyService) {
             onText(text)
             return
         }
-        if (ocrOn && Build.VERSION.SDK_INT >= 30) {
+        if (ocrOn && OcrEngine.available && Build.VERSION.SDK_INT >= 30) {
             ocrMode = true
             ocrOnce()
         } else {

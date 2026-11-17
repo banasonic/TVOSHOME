@@ -3,7 +3,6 @@ package com.tvoshome.app
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
-import com.googlecode.tesseract.android.TessBaseAPI
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -13,22 +12,38 @@ import java.net.URL
  * available as real text elements (e.g. subtitles burned into a TV channel or video).
  */
 object OcrEngine {
-    private var api: TessBaseAPI? = null
+    private var api: Any? = null
     private var loaded = ""
     @Volatile var status = ""
     @Volatile var lastUse = 0L
+
+    private val cls: Class<*>? by lazy {
+        try { Class.forName("com.googlecode.tesseract.android.TessBaseAPI") } catch (e: Throwable) { null }
+    }
+
+    /** True when the OCR library was included in this build. */
+    val available: Boolean get() = cls != null
+
+    /** tess-two (Tesseract 3) needs the old traineddata files; Tesseract4Android uses the small "fast" ones. */
+    private val legacy: Boolean by lazy { cls?.methods?.none { it.name == "recycle" } ?: false }
+
+    private fun m(name: String, vararg p: Class<*>) = cls!!.getMethod(name, *p)
 
     fun langs(idx: Int): List<String> =
         if (idx == 1) listOf("eng", "heb", "ara", "rus", "fra", "deu", "spa", "ita", "tur") else listOf("eng", "heb", "ara", "rus")
 
     private fun root(ctx: Context) = File(ctx.filesDir, "ocr")
 
+    private fun dataUrl(lang: String): String =
+        if (legacy) "https://github.com/tesseract-ocr/tessdata/raw/3.04.00/" + lang + ".traineddata"
+        else "https://github.com/tesseract-ocr/tessdata_fast/raw/main/" + lang + ".traineddata"
+
     private fun download(url: String, dest: File): Boolean {
         val tmp = File(dest.parentFile, dest.name + ".part")
         return try {
             val c = URL(url).openConnection() as HttpURLConnection
             c.connectTimeout = 10000
-            c.readTimeout = 20000
+            c.readTimeout = 30000
             c.instanceFollowRedirects = true
             if (c.responseCode !in 200..299) { c.disconnect(); return false }
             c.inputStream.use { ins -> tmp.outputStream().use { out -> ins.copyTo(out) } }
@@ -43,6 +58,7 @@ object OcrEngine {
 
     /** Downloads any missing language file. True when everything is on the device. */
     fun ensure(ctx: Context, list: List<String>): Boolean {
+        if (!available) { status = "OCR library not included in this build"; return false }
         val dir = File(root(ctx), "tessdata")
         dir.mkdirs()
         var ok = true
@@ -50,31 +66,31 @@ object OcrEngine {
             val f = File(dir, l + ".traineddata")
             if (f.exists() && f.length() > 50000L) continue
             status = "downloading " + l
-            if (!download("https://github.com/tesseract-ocr/tessdata_fast/raw/main/" + l + ".traineddata", f)) {
+            if (!download(dataUrl(l), f)) {
                 ok = false
                 status = "download failed: " + l
             }
         }
-        if (ok) status = "ready"
+        if (ok) status = "ready" + (if (legacy) " (legacy engine)" else "")
         return ok
     }
 
     @Synchronized
-    private fun get(ctx: Context, list: List<String>): TessBaseAPI? {
+    private fun get(ctx: Context, list: List<String>): Any? {
         val key = list.joinToString("+")
         val a = api
         if (a != null && loaded == key) return a
         release()
         if (!ensure(ctx, list)) return null
         return try {
-            val t = TessBaseAPI()
-            val ok = t.init(root(ctx).absolutePath, key)
+            val t = cls!!.getDeclaredConstructor().newInstance()
+            val ok = m("init", String::class.java, String::class.java).invoke(t, root(ctx).absolutePath, key) as? Boolean ?: false
             if (!ok) {
-                try { t.recycle() } catch (e: Throwable) { }
+                try { m(if (legacy) "end" else "recycle").invoke(t) } catch (e: Throwable) { }
                 status = "init failed"
                 null
             } else {
-                t.pageSegMode = 6
+                try { m("setPageSegMode", Integer.TYPE).invoke(t, 6) } catch (e: Throwable) { }
                 api = t
                 loaded = key
                 t
@@ -87,7 +103,8 @@ object OcrEngine {
 
     @Synchronized
     fun release() {
-        try { api?.recycle() } catch (e: Throwable) { }
+        val a = api
+        if (a != null) try { m(if (legacy) "end" else "recycle").invoke(a) } catch (e: Throwable) { }
         api = null
         loaded = ""
     }
@@ -98,10 +115,10 @@ object OcrEngine {
         val t = get(ctx, list) ?: return null
         lastUse = System.currentTimeMillis()
         return try {
-            t.setImage(bmp)
-            val txt = t.utf8Text ?: ""
-            val conf = t.meanConfidence()
-            t.clear()
+            m("setImage", Bitmap::class.java).invoke(t, bmp)
+            val txt = m("getUTF8Text").invoke(t) as? String ?: ""
+            val conf = m("meanConfidence").invoke(t) as? Int ?: 0
+            m("clear").invoke(t)
             Pair(txt.trim(), conf)
         } catch (e: Throwable) {
             status = "ocr error: " + e.javaClass.simpleName
