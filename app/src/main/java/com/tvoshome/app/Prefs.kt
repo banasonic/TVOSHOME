@@ -77,9 +77,13 @@ object Prefs {
     fun transColor(c: Context): Int = sp(c).getInt("tr_color", 0)
     fun transBg(c: Context): Int = sp(c).getInt("tr_bg", 0)
     fun transPoster(c: Context): Boolean = sp(c).getBoolean("tr_poster", true)
-    fun setTrans(c: Context, on: Boolean, size: Int, color: Int, bg: Int, poster: Boolean) {
+    fun transOcr(c: Context): Boolean = sp(c).getBoolean("tr_ocr", true)
+    fun transLang(c: Context): Int = sp(c).getInt("tr_lang", 0)
+    fun transPos(c: Context): Int = sp(c).getInt("tr_pos", 0)
+    fun setTrans(c: Context, on: Boolean, size: Int, color: Int, bg: Int, poster: Boolean, ocr: Boolean, lang: Int, pos: Int) {
         sp(c).edit().putBoolean("tr_on", on).putInt("tr_size", size.coerceIn(0, 4)).putInt("tr_color", color.coerceIn(0, 3))
-            .putInt("tr_bg", bg.coerceIn(0, 2)).putBoolean("tr_poster", poster).apply()
+            .putInt("tr_bg", bg.coerceIn(0, 2)).putBoolean("tr_poster", poster).putBoolean("tr_ocr", ocr)
+            .putInt("tr_lang", lang.coerceIn(0, 1)).putInt("tr_pos", pos.coerceIn(0, 1)).apply()
     }
     fun transRect(c: Context): FloatArray? {
         val p = sp(c)

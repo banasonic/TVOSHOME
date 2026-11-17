@@ -15,6 +15,7 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -35,7 +36,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.ArrayDeque
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executors
 
 /** Free translation (Google's public web endpoint, no key) with a small cache. */
@@ -442,9 +446,11 @@ class PosterView(context: Context) : View(context) {
 }
 
 /**
- * Screen translation to Arabic for any app. Reads only the text elements inside a box the user
- * places (accessibility; no screenshots, no OCR), translates it once per change, and draws the
- * Arabic text over the original. Everything stops when nothing changes, so it stays light.
+ * Screen translation to Arabic for any app.
+ * 1) Text elements inside the user's box are read through accessibility (cheap, most apps).
+ * 2) If the box has no text elements (subtitles burned into a channel / video), a screenshot of the
+ *    box is read with on-device OCR (Android 11+), only when the picture in the box changed.
+ * The Arabic text is drawn over (or just above) the original. Nothing runs when nothing changes.
  */
 class ScreenTranslator(private val svc: KeyService) {
     private val ctx: Context = svc
@@ -452,6 +458,7 @@ class ScreenTranslator(private val svc: KeyService) {
     private var thread: HandlerThread? = null
     private var worker: Handler? = null
     private var exec: ExecutorService? = null
+    private var ocrExec: ExecutorService? = null
 
     @Volatile var enabled = false
     @Volatile var placing = false
@@ -460,37 +467,51 @@ class ScreenTranslator(private val svc: KeyService) {
     private var colorIdx = 0
     private var bgIdx = 0
     private var posterOn = true
+    private var ocrOn = true
+    private var langIdx = 0
+    private var posIdx = 0
 
     private var rect = IntArray(4)
     private var sw = 1920
     private var sh = 1080
     private var sizeMode = false
     private var toggled = false
+    private var placeSince = 0L
+    private var okDown = false
+    private var backDown = false
 
     private var boxView: BoxView? = null
     private var boxAttached = false
     private var transView: TransView? = null
     private var transAttached = false
-    private var shownText = ""
+    @Volatile private var shownText = ""
     private var posterView: PosterView? = null
     private var posterAttached = false
 
     @Volatile private var scanPending = false
     private var lastScan = 0L
     private var lastDur = 0L
-    private var lastText = ""
-    private var lastAr = ""
-    private var stable = 0
-    private var emptyCount = 0
+    @Volatile private var lastText = ""
+    @Volatile private var lastAr = ""
+    @Volatile private var stable = 0
+    @Volatile private var emptyCount = 0
     @Volatile private var busy = false
     @Volatile private var pending: String? = null
     private var movieTried = ""
     private val hidePosterRun = Runnable { detachPoster() }
 
+    // OCR state
+    @Volatile private var ocrBusy = false
+    @Volatile private var ocrMode = false
+    @Volatile private var lastOcrMs = 0L
+    private var lastSig: IntArray? = null
+    private var lastOcrText = ""
+
     private val pollRun = object : Runnable {
         override fun run() {
             if (!running) return
             requestScan()
+            if (OcrEngine.lastUse > 0 && System.currentTimeMillis() - OcrEngine.lastUse > 90000L) OcrEngine.release()
             worker?.postDelayed(this, 1500L)
         }
     }
@@ -501,6 +522,9 @@ class ScreenTranslator(private val svc: KeyService) {
         colorIdx = Prefs.transColor(ctx)
         bgIdx = Prefs.transBg(ctx)
         posterOn = Prefs.transPoster(ctx)
+        ocrOn = Prefs.transOcr(ctx)
+        langIdx = Prefs.transLang(ctx)
+        posIdx = Prefs.transPos(ctx)
         if (!on) {
             if (enabled) shutdown()
             return
@@ -511,12 +535,18 @@ class ScreenTranslator(private val svc: KeyService) {
         sw = dm.widthPixels
         sh = dm.heightPixels
         transView?.style(sizeIdx, colorIdx, bgIdx)
+        if (transAttached) relayoutTrans()
         if (thread == null) {
             val t = HandlerThread("trans-scan", Process.THREAD_PRIORITY_BACKGROUND)
             t.start()
             thread = t
             worker = Handler(t.looper)
             exec = Executors.newSingleThreadExecutor()
+            ocrExec = Executors.newSingleThreadExecutor { r ->
+                val th = Thread(r, "trans-ocr")
+                th.priority = Thread.MIN_PRIORITY
+                th
+            }
         }
         if (Prefs.transRect(ctx) == null) {
             if (!placing) startPlace()
@@ -539,9 +569,12 @@ class ScreenTranslator(private val svc: KeyService) {
         worker = null
         exec?.shutdownNow()
         exec = null
+        ocrExec?.shutdownNow()
+        ocrExec = null
         scanPending = false
         lastText = ""
         shownText = ""
+        OcrEngine.release()
     }
 
     // ---------------------------------------------------------------- placing the box
@@ -568,6 +601,13 @@ class ScreenTranslator(private val svc: KeyService) {
             (rect[2] - rect[0]) / sw.toFloat(), (rect[3] - rect[1]) / sh.toFloat()))
     }
 
+    /** Where the Arabic strip is drawn: over the box, or just above it (below if there is no room). */
+    private fun transRect(): IntArray {
+        if (posIdx == 0) return rect
+        val h = rect[3] - rect[1]
+        return if (rect[1] - h >= 0) intArrayOf(rect[0], rect[1] - h, rect[2], rect[1]) else intArrayOf(rect[0], minOf(sh - h, rect[3]), rect[2], minOf(sh, rect[3] + h))
+    }
+
     fun startPlace() {
         if (!enabled) return
         running = false
@@ -576,10 +616,12 @@ class ScreenTranslator(private val svc: KeyService) {
         detachTrans()
         placing = true
         sizeMode = false
+        okDown = false
+        backDown = false
+        placeSince = SystemClock.elapsedRealtime()
         val v = boxView ?: BoxView(ctx).also { it.host = this; boxView = it }
         v.sizeMode = false
-        attach(v, true) { boxAttached = it }
-        boxAttached = true
+        attach(v, true, rect) { boxAttached = it }
     }
 
     fun confirm() {
@@ -599,33 +641,42 @@ class ScreenTranslator(private val svc: KeyService) {
             rect[0] = nx; rect[1] = ny; rect[2] = nx + w; rect[3] = ny + h
         }
         clamp()
-        relayout(boxView, boxAttached)
+        relayoutBox()
     }
 
-    /** Remote while placing: arrows move / resize, OK = start, long OK = switch move<->size. */
+    /**
+     * Remote while placing: arrows move / resize, OK = start, long OK = switch move<->size.
+     * Key presses that began before the box appeared (the click that switched the option on) are ignored.
+     */
     fun onPlaceKey(e: KeyEvent): Boolean {
         val code = e.keyCode
+        val grace = SystemClock.elapsedRealtime() - placeSince < 800L
         if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER) {
             if (e.action == KeyEvent.ACTION_DOWN) {
-                if (e.repeatCount == 0) toggled = false
-                if (e.repeatCount >= 3 && !toggled) {
+                if (e.repeatCount == 0) { toggled = false; okDown = !grace }
+                if (okDown && e.repeatCount >= 3 && !toggled) {
                     toggled = true
                     sizeMode = !sizeMode
                     boxView?.sizeMode = sizeMode
                     boxView?.invalidate()
                 }
             } else if (e.action == KeyEvent.ACTION_UP) {
-                if (!toggled) confirm()
+                if (okDown && !toggled) confirm()
+                okDown = false
                 toggled = false
             }
             return true
         }
         if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE) {
-            if (e.action == KeyEvent.ACTION_UP) confirm()
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) backDown = !grace
+            if (e.action == KeyEvent.ACTION_UP) {
+                if (backDown) confirm()
+                backDown = false
+            }
             return true
         }
         if (e.action != KeyEvent.ACTION_DOWN) return true
-        val step = maxOf(3, (sw * 0.004f * (1 + minOf(e.repeatCount, 18) / 3)).toInt())
+        val step = maxOf(6, (sw * 0.008f * (1 + minOf(e.repeatCount, 18) / 2)).toInt())
         when (code) {
             KeyEvent.KEYCODE_DPAD_LEFT -> dragBy(-step, 0, sizeMode)
             KeyEvent.KEYCODE_DPAD_RIGHT -> dragBy(step, 0, sizeMode)
@@ -641,6 +692,8 @@ class ScreenTranslator(private val svc: KeyService) {
         running = true
         lastText = ""
         lastAr = ""
+        lastOcrText = ""
+        lastSig = null
         stable = 0
         emptyCount = 0
         worker?.removeCallbacks(pollRun)
@@ -658,7 +711,7 @@ class ScreenTranslator(private val svc: KeyService) {
             detachTrans()
             detachPoster()
         } else {
-            if (placing) boxView?.let { attach(it, true) { a -> boxAttached = a } }
+            if (placing) boxView?.let { attach(it, true, rect) { a -> boxAttached = a } }
             else if (running && shownText.isNotEmpty()) showTrans(shownText)
         }
     }
@@ -667,7 +720,8 @@ class ScreenTranslator(private val svc: KeyService) {
         val w = worker ?: return
         if (scanPending || !running) return
         scanPending = true
-        val wait = maxOf(0L, maxOf(600L, lastDur * 3L) - (SystemClock.elapsedRealtime() - lastScan))
+        val gap = if (ocrMode) maxOf(if (posIdx == 0 && shownText.isNotEmpty()) 2500L else 1200L, lastOcrMs * 2L) else maxOf(600L, lastDur * 3L)
+        val wait = maxOf(0L, gap - (SystemClock.elapsedRealtime() - lastScan))
         w.postDelayed({
             scanPending = false
             val t0 = SystemClock.elapsedRealtime()
@@ -682,6 +736,22 @@ class ScreenTranslator(private val svc: KeyService) {
         val m = svc.mode
         if (m == "full" || m == "standby" || m == "prompt") return
         val text = try { RegionText.read(svc, Rect(rect[0], rect[1], rect[2], rect[3])) } catch (e: Exception) { "" }
+        if (text.length >= 2 && text.count { it.isLetter() } >= 2) {
+            ocrMode = false
+            onText(text)
+            return
+        }
+        if (ocrOn && Build.VERSION.SDK_INT >= 30) {
+            ocrMode = true
+            ocrOnce()
+        } else {
+            ocrMode = false
+            onText("")
+        }
+    }
+
+    /** Common handling of a freshly read text ("" = nothing in the box). */
+    private fun onText(text: String) {
         if (text.length < 2 || text.count { it.isLetter() } < 2) {
             emptyCount++
             stable = 0
@@ -701,6 +771,81 @@ class ScreenTranslator(private val svc: KeyService) {
         stable = 0
         translate(text)
     }
+
+    // ---- OCR path
+
+    /** Screenshot (Android 11+). The callback gets a software copy or null. */
+    private fun capture(cb: (Bitmap?) -> Unit) {
+        if (Build.VERSION.SDK_INT < 30) { cb(null); return }
+        try {
+            svc.takeScreenshot(android.view.Display.DEFAULT_DISPLAY, { r -> Thread(r).start() }, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    var bmp: Bitmap? = null
+                    try {
+                        val hb = result.hardwareBuffer
+                        val hw = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                        if (hw != null) {
+                            bmp = hw.copy(Bitmap.Config.ARGB_8888, false)
+                            hw.recycle()
+                        }
+                        hb.close()
+                    } catch (e: Exception) { }
+                    cb(bmp)
+                }
+
+                override fun onFailure(errorCode: Int) { cb(null) }
+            })
+        } catch (e: Exception) {
+            cb(null)
+        }
+    }
+
+    private fun ocrOnce() {
+        if (ocrBusy) return
+        val ox = ocrExec ?: return
+        ocrBusy = true
+        val blink = posIdx == 0 && transAttached
+        if (blink) ui.post { transView?.alpha = 0f }
+        ox.execute {
+            if (blink) try { Thread.sleep(110) } catch (e: Exception) { }
+            capture { frame ->
+                if (blink) ui.post { transView?.alpha = 1f }
+                if (frame == null) {
+                    ocrBusy = false
+                    onText("")
+                } else {
+                    try { processFrame(frame) } catch (e: Throwable) { } finally { frame.recycle(); ocrBusy = false }
+                }
+            }
+        }
+    }
+
+    private fun processFrame(frame: Bitmap) {
+        val box = OcrPrep.clampRect(frame, Rect(rect[0], rect[1], rect[2], rect[3]))
+        val sig = OcrPrep.sig(frame, box)
+        val prev = lastSig
+        if (prev != null && OcrPrep.diff(sig, prev) <= 5) {
+            onText(lastOcrText)          // same picture: reuse, no OCR work
+            return
+        }
+        lastSig = sig
+        val t0 = SystemClock.elapsedRealtime()
+        val langs = OcrEngine.langs(langIdx)
+        var best = ""
+        for (mode in 0..1) {
+            val bmp = OcrPrep.prepare(frame, box, mode) ?: continue
+            val res = OcrEngine.recognize(ctx, langs, bmp)
+            bmp.recycle()
+            if (res == null) break
+            val clean = OcrPrep.clean(res.first)
+            if (res.second >= 50 && clean.length >= 3) { best = clean; break }
+        }
+        lastOcrMs = SystemClock.elapsedRealtime() - t0
+        lastOcrText = best
+        onText(best)
+    }
+
+    // ---- translate
 
     private fun translate(text: String) {
         val ex = exec ?: return
@@ -737,6 +882,46 @@ class ScreenTranslator(private val svc: KeyService) {
         }
     }
 
+    // ---------------------------------------------------------------- diagnostics
+
+    /** Settings "Test OCR": what each reading method sees right now. */
+    fun testReport(): String {
+        val sb = StringBuilder()
+        sb.append("android=").append(Build.VERSION.SDK_INT)
+        if (!enabled) return sb.append(" | option is off").toString()
+        if (Prefs.transRect(ctx) == null) return sb.append(" | place the box first").toString()
+        if (!placing && !running) loadRect()
+        val r = Rect(rect[0], rect[1], rect[2], rect[3])
+        val nodes = try { RegionText.read(svc, r) } catch (e: Exception) { "" }
+        sb.append(" | text elements: ").append(if (nodes.isEmpty()) "none" else nodes.take(100).replace('\n', ' '))
+        if (Build.VERSION.SDK_INT < 30) return sb.append(" | screenshot: needs Android 11+").toString()
+        val latch = CountDownLatch(1)
+        var frame: Bitmap? = null
+        capture { b -> frame = b; latch.countDown() }
+        try { latch.await(6, TimeUnit.SECONDS) } catch (e: Exception) { }
+        val f = frame
+        if (f == null) return sb.append(" | screenshot: FAILED (re-enable the accessibility service once)").toString()
+        sb.append(" | screenshot ").append(f.width).append("x").append(f.height).append(" boxLuma=").append(OcrPrep.avgLuma(f, r))
+        val langs = OcrEngine.langs(langIdx)
+        val ready = OcrEngine.ensure(ctx, langs)
+        sb.append(" | ocr data: ").append(OcrEngine.status)
+        if (ready) {
+            val box = OcrPrep.clampRect(f, r)
+            for (mode in 0..1) {
+                val bmp = OcrPrep.prepare(f, box, mode)
+                if (bmp == null) { sb.append(" | pass").append(mode).append(": no text-like pixels"); continue }
+                val t0 = SystemClock.elapsedRealtime()
+                val res = OcrEngine.recognize(ctx, langs, bmp)
+                bmp.recycle()
+                val ms = SystemClock.elapsedRealtime() - t0
+                if (res == null) sb.append(" | pass").append(mode).append(": engine ").append(OcrEngine.status)
+                else sb.append(" | pass").append(mode).append(" ").append(ms).append("ms conf=").append(res.second).append(": ").append(OcrPrep.clean(res.first).take(100).replace('\n', ' '))
+            }
+        }
+        f.recycle()
+        return sb.toString()
+    }
+
     // ---------------------------------------------------------------- windows
 
     private fun lp(r: IntArray, touchable: Boolean): WindowManager.LayoutParams {
@@ -750,7 +935,7 @@ class ScreenTranslator(private val svc: KeyService) {
         return p
     }
 
-    private fun attach(v: View, touchable: Boolean, rr: IntArray = rect, done: (Boolean) -> Unit) {
+    private fun attach(v: View, touchable: Boolean, rr: IntArray, done: (Boolean) -> Unit) {
         val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         try {
             if (v.parent != null) wm.updateViewLayout(v, lp(rr, touchable)) else wm.addView(v, lp(rr, touchable))
@@ -760,9 +945,16 @@ class ScreenTranslator(private val svc: KeyService) {
         }
     }
 
-    private fun relayout(v: View?, attached: Boolean) {
-        if (v == null || !attached) return
-        try { (ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).updateViewLayout(v, lp(rect, v === boxView)) } catch (e: Exception) { }
+    private fun relayoutBox() {
+        val v = boxView ?: return
+        if (!boxAttached) return
+        try { (ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).updateViewLayout(v, lp(rect, true)) } catch (e: Exception) { }
+    }
+
+    private fun relayoutTrans() {
+        val v = transView ?: return
+        if (v.parent == null) return
+        try { (ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).updateViewLayout(v, lp(transRect(), false)) } catch (e: Exception) { }
     }
 
     private fun remove(v: View?) {
@@ -781,7 +973,8 @@ class ScreenTranslator(private val svc: KeyService) {
         val v = transView ?: TransView(ctx).also { transView = it }
         v.style(sizeIdx, colorIdx, bgIdx)
         v.setText(ar)
-        attach(v, false) { transAttached = it }
+        v.alpha = 1f
+        attach(v, false, transRect()) { transAttached = it }
     }
 
     private fun hideTrans() {

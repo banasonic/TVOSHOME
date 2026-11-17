@@ -5,6 +5,7 @@
     android:accessibilityFlags="flagRequestFilterKeyEvents|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
     android:canRequestFilterKeyEvents="true"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:notificationTimeout="100"
     android:description="@string/svc_desc"
     android:settingsActivity="com.tvoshome.app.MainActivity" />

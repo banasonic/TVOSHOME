@@ -145,6 +145,22 @@ class KeyService : AccessibilityService() {
         }
     }
 
+    /** Settings "Test OCR": hide the cards 8 s (show the text meanwhile), then report what each reader sees. */
+    fun transTestLater() {
+        ui.post {
+            showMode("hidden")
+            ui.postDelayed({
+                Thread {
+                    val r = try { trans?.testReport() ?: "option is off" } catch (e: Throwable) { "error: " + e }
+                    ui.post {
+                        js("S.dg3=" + org.json.JSONObject.quote(r) + ";R()")
+                        showMode("full")
+                    }
+                }.start()
+            }, 8000L)
+        }
+    }
+
     /** Settings: (re)place the translation box. */
     fun transPlace() {
         ui.post { trans?.startPlace() }

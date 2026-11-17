@@ -13,6 +13,7 @@ android {
         targetSdk = 28
         versionCode = 1
         versionName = "1.0"
+        ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
     }
 
     buildTypes {
@@ -28,4 +29,5 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.webkit:webkit:1.11.0")
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.7.0")
 }
