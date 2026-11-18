@@ -29,14 +29,27 @@ object OcrEngine {
 
     private fun m(name: String, vararg p: Class<*>) = cls!!.getMethod(name, *p)
 
-    fun langs(idx: Int): List<String> =
-        if (idx == 1) listOf("eng", "heb", "ara", "rus", "fra", "deu", "spa", "ita", "tur") else listOf("eng", "heb", "ara", "rus")
+    /** Script models: one model reads every language written in that script (Serbian, Croatian, Hungarian, Albanian ... all Latin). */
+    val PROFILES = listOf("Latin", "Hebrew", "Arabic", "Cyrillic", "Greek")
+
+    /** Data files behind a script profile (old engine: the closest language packs). */
+    fun files(profile: String): List<String> {
+        if (!legacy) return listOf(profile)
+        return when (profile) {
+            "Latin" -> listOf("eng", "hrv", "hun", "sqi", "fra", "deu", "spa", "ita", "tur")
+            "Hebrew" -> listOf("heb")
+            "Arabic" -> listOf("ara")
+            "Cyrillic" -> listOf("rus", "srp")
+            else -> listOf("ell")
+        }
+    }
 
     private fun root(ctx: Context) = File(ctx.filesDir, "ocr")
 
-    private fun dataUrl(lang: String): String =
-        if (legacy) "https://github.com/tesseract-ocr/tessdata/raw/3.04.00/" + lang + ".traineddata"
-        else "https://github.com/tesseract-ocr/tessdata_fast/raw/main/" + lang + ".traineddata"
+    private fun dataUrl(name: String): String =
+        if (legacy) "https://github.com/tesseract-ocr/tessdata/raw/3.04.00/" + name + ".traineddata"
+        else if (name[0].isUpperCase()) "https://github.com/tesseract-ocr/tessdata_fast/raw/main/script/" + name + ".traineddata"
+        else "https://github.com/tesseract-ocr/tessdata_fast/raw/main/" + name + ".traineddata"
 
     private fun download(url: String, dest: File): Boolean {
         val tmp = File(dest.parentFile, dest.name + ".part")

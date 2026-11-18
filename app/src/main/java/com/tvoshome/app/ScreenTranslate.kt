@@ -64,7 +64,8 @@ object Translator {
         if (gap > 0) try { Thread.sleep(gap) } catch (e: Exception) { }
         lastReq = SystemClock.elapsedRealtime()
         val body = MatchLookup.http("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q=" +
-            URLEncoder.encode(text, "UTF-8"), 200000) ?: return null
+            URLEncoder.encode(text, "UTF-8"), 200000)
+        if (body == null) return alt(text)
         return try {
             val arr = JSONArray(body)
             val segs = arr.getJSONArray(0)
@@ -76,6 +77,22 @@ object Translator {
             val out = if (arr.optString(2, "") == "ar") "" else sb.toString().trim()
             synchronized(cache) { cache[text] = out }
             out
+        } catch (e: Exception) { alt(text) }
+    }
+
+    /** Second free endpoint, used only when the first one fails. */
+    private fun alt(text: String): String? {
+        val body = MatchLookup.http("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=ar&q=" +
+            URLEncoder.encode(text, "UTF-8"), 200000) ?: return null
+        return try {
+            val a = JSONArray(body)
+            val e0 = a.opt(0)
+            var t = ""
+            var src = ""
+            if (e0 is JSONArray) { t = e0.optString(0, ""); src = e0.optString(1, "") } else if (e0 is String) t = e0
+            val out = if (src == "ar") "" else t.trim()
+            if (out.isNotEmpty() || src == "ar") synchronized(cache) { cache[text] = out }
+            if (out.isEmpty() && src != "ar") null else out
         } catch (e: Exception) { null }
     }
 }
@@ -357,11 +374,13 @@ class BoxView(context: Context) : View(context) {
         p.typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         p.textSize = ok.height() * 0.55f
         c.drawText("OK", ok.centerX(), ok.centerY() - (p.descent() + p.ascent()) / 2f, p)
-        // hint
-        val hint = "ضع الصندوق فوق الترجمة الأصلية ثم اضغط OK  ·  الضغط المطوّل على OK: تحريك ⇄ تكبير"
+        // hint (mode aware)
+        val hint = if (sizeMode) "وضع الحجم · الأسهم تغيّر الأبعاد · OK مطوّل = تحريك · OK = تأكيد"
+        else "وضع التحريك · OK مطوّل = تغيير الحجم · OK = تأكيد"
         p.textSize = minOf(h * 0.22f, 15f * density)
-        val tw = p.measureText(hint)
-        if (tw < w * 0.92f) {
+        var tw = p.measureText(hint)
+        if (tw > w * 0.9f) { p.textSize = p.textSize * (w * 0.9f) / tw; tw = p.measureText(hint) }
+        if (p.textSize >= 9f * density) {
             p.color = 0x99000000.toInt()
             c.drawRoundRect(RectF(w / 2f - tw / 2f - 8f * density, h / 2f - p.textSize, w / 2f + tw / 2f + 8f * density, h / 2f + p.textSize * 0.7f), 8f * density, 8f * density, p)
             p.color = 0xFFFFFFFF.toInt()
@@ -644,24 +663,35 @@ class ScreenTranslator(private val svc: KeyService) {
         relayoutBox()
     }
 
+    private var okDownAt = 0L
+
+    private fun flipMode() {
+        sizeMode = !sizeMode
+        boxView?.sizeMode = sizeMode
+        boxView?.invalidate()
+    }
+
     /**
      * Remote while placing: arrows move / resize, OK = start, long OK = switch move<->size.
+     * Long press is measured by time (not only by key repeats, which some remotes never send).
+     * Number keys 4/6 = narrower/wider, 2/8 = shorter/taller, CH+/CH- = taller/shorter.
      * Key presses that began before the box appeared (the click that switched the option on) are ignored.
      */
     fun onPlaceKey(e: KeyEvent): Boolean {
         val code = e.keyCode
-        val grace = SystemClock.elapsedRealtime() - placeSince < 800L
+        val now = SystemClock.elapsedRealtime()
+        val grace = now - placeSince < 800L
         if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER) {
             if (e.action == KeyEvent.ACTION_DOWN) {
-                if (e.repeatCount == 0) { toggled = false; okDown = !grace }
-                if (okDown && e.repeatCount >= 3 && !toggled) {
+                if (e.repeatCount == 0) { toggled = false; okDown = !grace; okDownAt = now }
+                if (okDown && !toggled && (e.repeatCount >= 3 || now - okDownAt >= 650L)) {
                     toggled = true
-                    sizeMode = !sizeMode
-                    boxView?.sizeMode = sizeMode
-                    boxView?.invalidate()
+                    flipMode()
                 }
             } else if (e.action == KeyEvent.ACTION_UP) {
-                if (okDown && !toggled) confirm()
+                if (okDown && !toggled) {
+                    if (now - okDownAt >= 650L) flipMode() else confirm()
+                }
                 okDown = false
                 toggled = false
             }
@@ -682,6 +712,10 @@ class ScreenTranslator(private val svc: KeyService) {
             KeyEvent.KEYCODE_DPAD_RIGHT -> dragBy(step, 0, sizeMode)
             KeyEvent.KEYCODE_DPAD_UP -> dragBy(0, -step, sizeMode)
             KeyEvent.KEYCODE_DPAD_DOWN -> dragBy(0, step, sizeMode)
+            KeyEvent.KEYCODE_4, KeyEvent.KEYCODE_NUMPAD_4, KeyEvent.KEYCODE_MEDIA_REWIND -> dragBy(-step, 0, true)
+            KeyEvent.KEYCODE_6, KeyEvent.KEYCODE_NUMPAD_6, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> dragBy(step, 0, true)
+            KeyEvent.KEYCODE_2, KeyEvent.KEYCODE_NUMPAD_2, KeyEvent.KEYCODE_CHANNEL_UP -> dragBy(0, -step, true)
+            KeyEvent.KEYCODE_8, KeyEvent.KEYCODE_NUMPAD_8, KeyEvent.KEYCODE_CHANNEL_DOWN -> dragBy(0, step, true)
         }
         return true
     }
@@ -820,6 +854,27 @@ class ScreenTranslator(private val svc: KeyService) {
         }
     }
 
+    private var sticky = "Latin"
+    private var lastAlt = 0L
+
+    /** OCR with the script that worked last time; other scripts are tried (at most every 6 s) when it fails. */
+    private fun readWith(bmp: Bitmap, allowAlt: Boolean): String {
+        val r = OcrEngine.recognize(ctx, OcrEngine.files(sticky), bmp) ?: return ""
+        val c = OcrPrep.clean(r.first)
+        if (r.second >= 55 && c.length >= 3) return c
+        if (!allowAlt) return ""
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAlt < 6000L) return ""
+        lastAlt = now
+        for (p in OcrEngine.PROFILES) {
+            if (p == sticky) continue
+            val a = OcrEngine.recognize(ctx, OcrEngine.files(p), bmp) ?: continue
+            val ac = OcrPrep.clean(a.first)
+            if (a.second >= 55 && ac.length >= 3) { sticky = p; return ac }
+        }
+        return ""
+    }
+
     private fun processFrame(frame: Bitmap) {
         val box = OcrPrep.clampRect(frame, Rect(rect[0], rect[1], rect[2], rect[3]))
         val sig = OcrPrep.sig(frame, box)
@@ -830,16 +885,17 @@ class ScreenTranslator(private val svc: KeyService) {
         }
         lastSig = sig
         val t0 = SystemClock.elapsedRealtime()
-        val langs = OcrEngine.langs(langIdx)
-        var best = ""
+        val cands = ArrayList<Bitmap>()
         for (mode in 0..1) {
-            val bmp = OcrPrep.prepare(frame, box, mode) ?: continue
-            val res = OcrEngine.recognize(ctx, langs, bmp)
-            bmp.recycle()
-            if (res == null) break
-            val clean = OcrPrep.clean(res.first)
-            if (res.second >= 50 && clean.length >= 3) { best = clean; break }
+            val b = OcrPrep.prepare(frame, box, mode)
+            if (b != null) cands.add(b)
         }
+        var best = ""
+        for (b in cands) {
+            if (best.isEmpty()) best = readWith(b, false)
+        }
+        if (best.isEmpty() && cands.isNotEmpty()) best = readWith(cands[0], true)
+        for (b in cands) b.recycle()
         lastOcrMs = SystemClock.elapsedRealtime() - t0
         lastOcrText = best
         onText(best)
@@ -902,22 +958,31 @@ class ScreenTranslator(private val svc: KeyService) {
         val f = frame
         if (f == null) return sb.append(" | screenshot: FAILED (re-enable the accessibility service once)").toString()
         sb.append(" | screenshot ").append(f.width).append("x").append(f.height).append(" boxLuma=").append(OcrPrep.avgLuma(f, r))
-        val langs = OcrEngine.langs(langIdx)
-        val ready = OcrEngine.ensure(ctx, langs)
-        sb.append(" | ocr data: ").append(OcrEngine.status)
-        if (ready) {
+        sb.append(" | engine=").append(if (OcrEngine.available) "included" else "MISSING")
+        if (OcrEngine.available) {
             val box = OcrPrep.clampRect(f, r)
-            for (mode in 0..1) {
-                val bmp = OcrPrep.prepare(f, box, mode)
-                if (bmp == null) { sb.append(" | pass").append(mode).append(": no text-like pixels"); continue }
-                val t0 = SystemClock.elapsedRealtime()
-                val res = OcrEngine.recognize(ctx, langs, bmp)
-                bmp.recycle()
-                val ms = SystemClock.elapsedRealtime() - t0
-                if (res == null) sb.append(" | pass").append(mode).append(": engine ").append(OcrEngine.status)
-                else sb.append(" | pass").append(mode).append(" ").append(ms).append("ms conf=").append(res.second).append(": ").append(OcrPrep.clean(res.first).take(100).replace('\n', ' '))
+            val bmps = ArrayList<Bitmap>()
+            for (mode in 0..1) { val b = OcrPrep.prepare(f, box, mode); if (b != null) bmps.add(b) }
+            if (bmps.isEmpty()) sb.append(" | no text-like pixels in the box")
+            for (pf in OcrEngine.PROFILES) {
+                var bestConf = -1
+                var bestTxt = ""
+                var ms = 0L
+                var failed = false
+                for (b in bmps) {
+                    val t0 = SystemClock.elapsedRealtime()
+                    val res = OcrEngine.recognize(ctx, OcrEngine.files(pf), b)
+                    ms += SystemClock.elapsedRealtime() - t0
+                    if (res == null) { failed = true; break }
+                    val c = OcrPrep.clean(res.first)
+                    if (res.second > bestConf && c.isNotEmpty()) { bestConf = res.second; bestTxt = c }
+                }
+                sb.append(" | ").append(pf).append(": ")
+                if (failed) sb.append(OcrEngine.status) else sb.append(ms).append("ms conf=").append(bestConf).append(" ").append(bestTxt.take(80).replace('\n', ' '))
+                if (bestConf >= 70) break
             }
-        }
+            for (b in bmps) b.recycle()
+        } else sb.append(" | ").append(OcrEngine.status)
         f.recycle()
         return sb.toString()
     }
