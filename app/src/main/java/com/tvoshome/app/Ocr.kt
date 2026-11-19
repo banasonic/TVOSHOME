@@ -188,7 +188,7 @@ object OcrPrep {
         val h = r.height()
         if (w < 20 || h < 12) return null
         val crop = Bitmap.createBitmap(frame, r.left, r.top, w, h)
-        val scale = if (w > 1000) 1000f / w else if (h < 60) 2f else 1f
+        val scale = if (w > 800) 800f / w else if (h < 60) 2f else 1f
         val sw = maxOf(8, (w * scale).toInt())
         val sh = maxOf(8, (h * scale).toInt())
         val sc = if (scale != 1f) Bitmap.createScaledBitmap(crop, sw, sh, true) else crop

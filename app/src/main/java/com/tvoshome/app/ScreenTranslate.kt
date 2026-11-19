@@ -60,7 +60,7 @@ object Translator {
     fun toArabic(text: String): String? {
         synchronized(cache) { val c = cache[text]; if (c != null) return c }
         if (arabicRatio(text) > 0.6f) return ""
-        val gap = 350L - (SystemClock.elapsedRealtime() - lastReq)
+        val gap = 120L - (SystemClock.elapsedRealtime() - lastReq)
         if (gap > 0) try { Thread.sleep(gap) } catch (e: Exception) { }
         lastReq = SystemClock.elapsedRealtime()
         val body = MatchLookup.http("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q=" +
@@ -518,6 +518,17 @@ class ScreenTranslator(private val svc: KeyService) {
     @Volatile private var pending: String? = null
     private var movieTried = ""
     private val hidePosterRun = Runnable { detachPoster() }
+    private var movieExec: ExecutorService? = null
+    @Volatile private var emptyStreak = 0
+    private var lastNodeCheck = 0L
+    private var stickyMode = 0
+    /** The sentence is hidden when it has not been seen for a moment; seeing it again refreshes the timer. */
+    private val hideRun = Runnable {
+        lastText = ""
+        lastAr = ""
+        stable = 0
+        hideTrans()
+    }
 
     // OCR state
     @Volatile private var ocrBusy = false
@@ -531,7 +542,7 @@ class ScreenTranslator(private val svc: KeyService) {
             if (!running) return
             requestScan()
             if (OcrEngine.lastUse > 0 && System.currentTimeMillis() - OcrEngine.lastUse > 90000L) OcrEngine.release()
-            worker?.postDelayed(this, 1500L)
+            worker?.postDelayed(this, if (ocrMode) 700L else 1500L)
         }
     }
 
@@ -561,6 +572,7 @@ class ScreenTranslator(private val svc: KeyService) {
             thread = t
             worker = Handler(t.looper)
             exec = Executors.newSingleThreadExecutor()
+            movieExec = Executors.newSingleThreadExecutor()
             ocrExec = Executors.newSingleThreadExecutor { r ->
                 val th = Thread(r, "trans-ocr")
                 th.priority = Thread.MIN_PRIORITY
@@ -588,6 +600,9 @@ class ScreenTranslator(private val svc: KeyService) {
         worker = null
         exec?.shutdownNow()
         exec = null
+        movieExec?.shutdownNow()
+        movieExec = null
+        ui.removeCallbacks(hideRun)
         ocrExec?.shutdownNow()
         ocrExec = null
         scanPending = false
@@ -622,7 +637,7 @@ class ScreenTranslator(private val svc: KeyService) {
 
     /** Where the Arabic strip is drawn: over the box, or just above it (below if there is no room). */
     private fun transRect(): IntArray {
-        if (posIdx == 0) return rect
+        if (posIdx == 0 && !ocrMode) return rect     // with OCR the strip must not hide the picture being read
         val h = rect[3] - rect[1]
         return if (rect[1] - h >= 0) intArrayOf(rect[0], rect[1] - h, rect[2], rect[1]) else intArrayOf(rect[0], minOf(sh - h, rect[3]), rect[2], minOf(sh, rect[3] + h))
     }
@@ -729,7 +744,7 @@ class ScreenTranslator(private val svc: KeyService) {
         lastOcrText = ""
         lastSig = null
         stable = 0
-        emptyCount = 0
+        emptyStreak = 0
         worker?.removeCallbacks(pollRun)
         worker?.postDelayed(pollRun, 800L)
         requestScan()
@@ -754,7 +769,8 @@ class ScreenTranslator(private val svc: KeyService) {
         val w = worker ?: return
         if (scanPending || !running) return
         scanPending = true
-        val gap = if (ocrMode) maxOf(if (posIdx == 0 && shownText.isNotEmpty()) 2500L else 1200L, lastOcrMs * 2L) else maxOf(600L, lastDur * 3L)
+        // OCR mode: next read right after the previous one; backs off while nothing is found (saves CPU)
+        val gap = if (ocrMode) (if (emptyStreak < 4) 200L else if (emptyStreak < 9) 450L else 900L) else maxOf(500L, lastDur * 3L)
         val wait = maxOf(0L, gap - (SystemClock.elapsedRealtime() - lastScan))
         w.postDelayed({
             scanPending = false
@@ -762,6 +778,8 @@ class ScreenTranslator(private val svc: KeyService) {
             lastScan = t0
             doScan()
             lastDur = SystemClock.elapsedRealtime() - t0
+            val mm = svc.mode
+            if (ocrMode && mm != "full" && mm != "standby" && mm != "prompt") requestScan()
         }, wait)
     }
 
@@ -769,14 +787,20 @@ class ScreenTranslator(private val svc: KeyService) {
         if (!running || placing) return
         val m = svc.mode
         if (m == "full" || m == "standby" || m == "prompt") return
-        val text = try { RegionText.read(svc, Rect(rect[0], rect[1], rect[2], rect[3])) } catch (e: Exception) { "" }
+        if (ocrMode && ocrBusy) return
+        val now = SystemClock.elapsedRealtime()
+        var text = ""
+        if (!ocrMode || now - lastNodeCheck > 3000L) {
+            lastNodeCheck = now
+            text = try { RegionText.read(svc, Rect(rect[0], rect[1], rect[2], rect[3])) } catch (e: Exception) { "" }
+        }
         if (text.length >= 2 && text.count { it.isLetter() } >= 2) {
-            ocrMode = false
+            if (ocrMode) { ocrMode = false; ui.post { relayoutTrans() } }
             onText(text)
             return
         }
         if (ocrOn && OcrEngine.available && Build.VERSION.SDK_INT >= 30) {
-            ocrMode = true
+            if (!ocrMode) { ocrMode = true; ui.post { relayoutTrans() } }
             ocrOnce()
         } else {
             ocrMode = false
@@ -784,18 +808,24 @@ class ScreenTranslator(private val svc: KeyService) {
         }
     }
 
+    /** Keeps the shown sentence alive while it is still being read; hides it shortly after it disappears. */
+    private fun refreshHide() {
+        val hold = if (ocrMode) minOf(4000L, maxOf(1500L, lastOcrMs * 2L + 700L)) else 1600L
+        ui.post {
+            ui.removeCallbacks(hideRun)
+            ui.postDelayed(hideRun, hold)
+        }
+    }
+
     /** Common handling of a freshly read text ("" = nothing in the box). */
     private fun onText(text: String) {
         if (text.length < 2 || text.count { it.isLetter() } < 2) {
-            emptyCount++
+            emptyStreak++
             stable = 0
-            if (emptyCount >= 3 && shownText.isNotEmpty()) {
-                lastText = ""
-                ui.post { hideTrans() }
-            }
             return
         }
-        emptyCount = 0
+        emptyStreak = 0
+        refreshHide()
         if (text == lastText) {
             stable++
             if (stable == 1 && posterOn && lastAr.isNotEmpty() && MovieLookup.looksLikeTitle(lastText)) movie(lastText, lastAr)
@@ -838,12 +868,8 @@ class ScreenTranslator(private val svc: KeyService) {
         if (ocrBusy) return
         val ox = ocrExec ?: return
         ocrBusy = true
-        val blink = posIdx == 0 && transAttached
-        if (blink) ui.post { transView?.alpha = 0f }
         ox.execute {
-            if (blink) try { Thread.sleep(110) } catch (e: Exception) { }
             capture { frame ->
-                if (blink) ui.post { transView?.alpha = 1f }
                 if (frame == null) {
                     ocrBusy = false
                     onText("")
@@ -885,17 +911,18 @@ class ScreenTranslator(private val svc: KeyService) {
         }
         lastSig = sig
         val t0 = SystemClock.elapsedRealtime()
-        val cands = ArrayList<Bitmap>()
-        for (mode in 0..1) {
-            val b = OcrPrep.prepare(frame, box, mode)
-            if (b != null) cands.add(b)
-        }
+        // polarity (bright / dark text) that worked last time goes first; the other one only if it finds nothing
+        val order = if (stickyMode == 0) intArrayOf(0, 1) else intArrayOf(1, 0)
+        val bmps = ArrayList<Bitmap>()
         var best = ""
-        for (b in cands) {
-            if (best.isEmpty()) best = readWith(b, false)
+        for (m in order) {
+            val b = OcrPrep.prepare(frame, box, m) ?: continue
+            bmps.add(b)
+            best = readWith(b, false)
+            if (best.isNotEmpty()) { stickyMode = m; break }
         }
-        if (best.isEmpty() && cands.isNotEmpty()) best = readWith(cands[0], true)
-        for (b in cands) b.recycle()
+        if (best.isEmpty() && bmps.isNotEmpty()) best = readWith(bmps[0], true)
+        for (b in bmps) b.recycle()
         lastOcrMs = SystemClock.elapsedRealtime() - t0
         lastOcrText = best
         onText(best)
@@ -931,7 +958,7 @@ class ScreenTranslator(private val svc: KeyService) {
     private fun movie(orig: String, ar: String) {
         if (movieTried == orig) return
         movieTried = orig
-        val ex = exec ?: return
+        val ex = movieExec ?: return
         ex.execute {
             val d = try { MovieLookup.find(orig, ar) } catch (e: Exception) { null }
             if (d != null && orig == lastText) ui.post { showPoster(d) }
