@@ -16,6 +16,7 @@ object OcrEngine {
     private var loaded = ""
     @Volatile var status = ""
     @Volatile var lastUse = 0L
+    private val dlLock = Any()
 
     private val cls: Class<*>? by lazy {
         try { Class.forName("com.googlecode.tesseract.android.TessBaseAPI") } catch (e: Throwable) { null }
@@ -78,10 +79,14 @@ object OcrEngine {
         for (l in list) {
             val f = File(dir, l + ".traineddata")
             if (f.exists() && f.length() > 50000L) continue
-            status = "downloading " + l
-            if (!download(dataUrl(l), f)) {
-                ok = false
-                status = "download failed: " + l
+            synchronized(dlLock) {
+                if (!(f.exists() && f.length() > 50000L)) {
+                    status = "downloading " + l
+                    if (!download(dataUrl(l), f)) {
+                        ok = false
+                        status = "download failed: " + l
+                    }
+                }
             }
         }
         if (ok) status = "ready" + (if (legacy) " (legacy engine)" else "")
@@ -204,10 +209,29 @@ object OcrPrep {
         }
         val frac = cnt.toFloat() / px.size
         if (frac < 0.004f || frac > 0.35f) return null
+        // keep only the rows / columns that really hold text: a smaller image is read much faster
+        val rowC = IntArray(sh)
+        val colC = IntArray(sw)
+        for (y in 0 until sh) for (x in 0 until sw) if (px[y * sw + x] == 0xFF000000.toInt()) { rowC[y]++; colC[x]++ }
+        val minRow = maxOf(2, sw / 250)
+        val minCol = maxOf(1, sh / 60)
+        var y0 = 0
+        while (y0 < sh && rowC[y0] < minRow) y0++
+        var y1 = sh - 1
+        while (y1 > y0 && rowC[y1] < minRow) y1--
+        var x0 = 0
+        while (x0 < sw && colC[x0] < minCol) x0++
+        var x1 = sw - 1
+        while (x1 > x0 && colC[x1] < minCol) x1--
+        val cw = x1 - x0 + 1
+        val ch = y1 - y0 + 1
+        if (cw < 16 || ch < 8) return null
         val pad = 8
-        val out = Bitmap.createBitmap(sw + pad * 2, sh + pad * 2, Bitmap.Config.ARGB_8888)
+        val sub = IntArray(cw * ch)
+        for (y in 0 until ch) System.arraycopy(px, (y0 + y) * sw + x0, sub, y * cw, cw)
+        val out = Bitmap.createBitmap(cw + pad * 2, ch + pad * 2, Bitmap.Config.ARGB_8888)
         out.eraseColor(0xFFFFFFFF.toInt())
-        out.setPixels(px, 0, sw, pad, pad, sw, sh)
+        out.setPixels(sub, 0, cw, pad, pad, cw, ch)
         return out
     }
 
