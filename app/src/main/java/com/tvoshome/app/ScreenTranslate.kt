@@ -1,7 +1,10 @@
 package com.tvoshome.app
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -42,12 +45,13 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executors
 
-/** Free translation (Google's public web endpoint, no key) with a small cache. */
+/** Free translation (Google's public web endpoint, no key) with a small cache and a kept-alive connection. */
 object Translator {
     private val cache = object : LinkedHashMap<String, String>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 60
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 80
     }
     private var lastReq = 0L
+    private const val UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
     fun arabicRatio(t: String): Float {
         var ar = 0
@@ -56,15 +60,36 @@ object Translator {
         return if (all == 0) 0f else ar.toFloat() / all
     }
 
+    /** GET that leaves the connection open for reuse (a new TLS handshake on every request costs hundreds of ms). */
+    private fun fetch(url: String): String? {
+        return try {
+            val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            c.connectTimeout = 6000
+            c.readTimeout = 8000
+            c.setRequestProperty("User-Agent", UA)
+            c.setRequestProperty("Connection", "keep-alive")
+            if (c.responseCode !in 200..299) {
+                try { c.errorStream?.close() } catch (e: Exception) { }
+                return null
+            }
+            c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } catch (e: Exception) { null }
+    }
+
+    /** Keeps the connection warm while the feature is on (called now and then). */
+    fun ping() {
+        fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ar&dt=t&q=ok")
+    }
+
     /** Arabic text, "" if the text is already Arabic, null on failure. */
     fun toArabic(text: String): String? {
         synchronized(cache) { val c = cache[text]; if (c != null) return c }
         if (arabicRatio(text) > 0.6f) return ""
-        val gap = 120L - (SystemClock.elapsedRealtime() - lastReq)
+        val gap = 100L - (SystemClock.elapsedRealtime() - lastReq)
         if (gap > 0) try { Thread.sleep(gap) } catch (e: Exception) { }
         lastReq = SystemClock.elapsedRealtime()
-        val body = MatchLookup.http("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q=" +
-            URLEncoder.encode(text, "UTF-8"), 200000)
+        val body = fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q=" +
+            URLEncoder.encode(text, "UTF-8"))
         if (body == null) return alt(text)
         return try {
             val arr = JSONArray(body)
@@ -82,8 +107,8 @@ object Translator {
 
     /** Second free endpoint, used only when the first one fails. */
     private fun alt(text: String): String? {
-        val body = MatchLookup.http("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=ar&q=" +
-            URLEncoder.encode(text, "UTF-8"), 200000) ?: return null
+        val body = fetch("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=ar&q=" +
+            URLEncoder.encode(text, "UTF-8")) ?: return null
         return try {
             val a = JSONArray(body)
             val e0 = a.opt(0)
@@ -120,8 +145,8 @@ object RegionText {
                     if (ir.intersect(region)) {
                         val ia = ir.width().toLong() * ir.height()
                         val na = b.width().toLong() * b.height()
-                        val minA = minOf(na, ra)
-                        if (minA > 0 && ia * 10 >= minA * 3) items.add(TextHit(t.toString().trim(), b))
+                        // the element must be (at least half) inside the box: a big container only partly inside would drag in text from outside
+                        if (na > 0 && ia * 2 >= na && ra > 0) items.add(TextHit(t.toString().trim(), b))
                     }
                 }
                 for (i in 0 until n.childCount) {
@@ -238,7 +263,7 @@ object MovieLookup {
     }
 }
 
-/** The translated strip drawn over the original text. */
+/** The translated strip. The font size follows the setting (not the box): the strip grows taller if the text needs it. */
 class TransView(context: Context) : View(context) {
     private var text = ""
     private var scale = 1f
@@ -246,13 +271,15 @@ class TransView(context: Context) : View(context) {
     private var bg = 0
     private var opaque = false
     private val density = context.resources.displayMetrics.density
+    private val screenH = context.resources.displayMetrics.heightPixels
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val tp = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private var layout: StaticLayout? = null
+    private var layoutW = 0
 
     fun style(sizeIdx: Int, colorIdx: Int, bgIdx: Int, solid: Boolean = false) {
         opaque = solid
-        scale = floatArrayOf(0.7f, 0.85f, 1f, 1.2f, 1.5f)[sizeIdx.coerceIn(0, 4)]
+        scale = floatArrayOf(0.7f, 0.85f, 1f, 1.25f, 1.6f)[sizeIdx.coerceIn(0, 4)]
         color = intArrayOf(0xFFFFFFFF.toInt(), 0xFFFFD60A.toInt(), 0xFF000000.toInt(), 0xFF64D2FF.toInt())[colorIdx.coerceIn(0, 3)]
         bg = bgIdx
         layout = null
@@ -264,6 +291,36 @@ class TransView(context: Context) : View(context) {
         text = t
         layout = null
         invalidate()
+    }
+
+    private fun padFor(w: Int): Int = maxOf(6, (w * 0.02f).toInt())
+
+    private fun build(w: Int): StaticLayout? {
+        if (text.isEmpty() || w < 20) return null
+        val pad = padFor(w)
+        val avail = (w - pad * 2).coerceAtLeast(10)
+        var size = screenH * 0.040f * scale
+        val maxH = screenH * 0.45f
+        tp.typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        tp.color = color
+        if (bg == 2) tp.setShadowLayer(4f * density, 0f, 1.5f * density, 0xFF000000.toInt()) else tp.clearShadowLayer()
+        var l: StaticLayout
+        while (true) {
+            tp.textSize = size
+            l = StaticLayout.Builder.obtain(text, 0, text.length, tp, avail)
+                .setAlignment(Layout.Alignment.ALIGN_CENTER).setIncludePad(false).build()
+            if (l.height + pad * 2 <= maxH || size <= 12f * density) break
+            size *= 0.92f
+        }
+        return l
+    }
+
+    /** Height the strip needs for the current text at width [w]. */
+    fun needHeight(w: Int): Int {
+        val l = build(w) ?: return 0
+        layout = l
+        layoutW = w
+        return l.height + padFor(w) * 2
     }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
@@ -281,27 +338,14 @@ class TransView(context: Context) : View(context) {
             1 -> { paint.color = if (opaque) 0xFFFFFFFF.toInt() else 0xEBFFFFFF.toInt(); c.drawRoundRect(RectF(0f, 0f, w, h), r, r, paint) }
         }
         var l = layout
-        if (l == null) {
-            val pad = w * 0.02f
-            val avail = (w - pad * 2).toInt().coerceAtLeast(10)
-            var size = h * 0.42f * scale
-            val minSize = 9f * density
-            tp.typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            tp.color = color
-            if (bg == 2) tp.setShadowLayer(4f * density, 0f, 1.5f * density, 0xFF000000.toInt()) else tp.clearShadowLayer()
-            while (true) {
-                tp.textSize = size
-                l = StaticLayout.Builder.obtain(text, 0, text.length, tp, avail)
-                    .setAlignment(Layout.Alignment.ALIGN_CENTER).setIncludePad(false).build()
-                if (l.height <= h * 0.94f || size <= minSize) break
-                size *= 0.92f
-            }
+        if (l == null || layoutW != width) {
+            l = build(width)
             layout = l
+            layoutW = width
         }
         val ly = l ?: return
         c.save()
-        c.translate(w * 0.02f, (h - ly.height) / 2f)
-        c.clipRect(0f, -h, w, h * 2f)
+        c.translate(padFor(width).toFloat(), (h - ly.height) / 2f)
         ly.draw(c)
         c.restore()
     }
@@ -521,6 +565,14 @@ class ScreenTranslator(private val svc: KeyService) {
     private var movieTried = ""
     private val hidePosterRun = Runnable { detachPoster() }
     private var movieExec: ExecutorService? = null
+    @Volatile private var peekAt = 0L
+    private var firstSeenAt = 0L
+    @Volatile private var lastShotAt = 0L
+    private var lastPing = 0L
+    private var screenRx: BroadcastReceiver? = null
+    private var previewView: TransView? = null
+    private val previewHide = Runnable { remove(previewView) }
+    private var lastStyleKey = ""
     @Volatile private var emptyStreak = 0
     private var lastNodeCheck = 0L
     private var stickyMode = 0
@@ -544,7 +596,12 @@ class ScreenTranslator(private val svc: KeyService) {
         override fun run() {
             if (!running) return
             requestScan()
-            if (OcrEngine.lastUse > 0 && System.currentTimeMillis() - OcrEngine.lastUse > 300000L) OcrEngine.release()
+            if (OcrEngine.lastUse > 0 && System.currentTimeMillis() - OcrEngine.lastUse > 1200000L) OcrEngine.release()
+            val nowP = SystemClock.elapsedRealtime()
+            if (nowP - lastPing > 45000L) {
+                lastPing = nowP
+                exec?.execute { try { Translator.ping() } catch (e: Exception) { } }
+            }
             worker?.postDelayed(this, if (ocrMode) 700L else 1500L)
         }
     }
@@ -558,6 +615,9 @@ class ScreenTranslator(private val svc: KeyService) {
         ocrOn = Prefs.transOcr(ctx)
         langIdx = Prefs.transLang(ctx)
         posIdx = Prefs.transPos(ctx)
+        val styleKey = "" + sizeIdx + "/" + colorIdx + "/" + bgIdx + "/" + posIdx
+        val styleChanged = lastStyleKey.isNotEmpty() && styleKey != lastStyleKey
+        lastStyleKey = styleKey
         if (!on) {
             if (enabled) shutdown()
             return
@@ -582,12 +642,39 @@ class ScreenTranslator(private val svc: KeyService) {
                 th
             }
         }
+        if (screenRx == null) {
+            val rx = object : BroadcastReceiver() {
+                override fun onReceive(c: Context?, i: Intent?) {
+                    // back from sleep: warm everything up again right away
+                    if (running) { emptyStreak = 0; warmUp(); requestScan() }
+                }
+            }
+            try {
+                val f = IntentFilter(Intent.ACTION_SCREEN_ON)
+                f.addAction(Intent.ACTION_USER_PRESENT)
+                ctx.registerReceiver(rx, f)
+                screenRx = rx
+            } catch (e: Exception) { }
+        }
         if (Prefs.transRect(ctx) == null) {
             if (!placing) startPlace()
         } else if (!placing && !running) {
             loadRect()
             startRunning()
         }
+        if (styleChanged) showPreview()
+    }
+
+    /** Shows a sample sentence for a moment so size / colour / background changes are visible at once (even over the settings). */
+    private fun showPreview() {
+        if (!enabled || placing || Prefs.transRect(ctx) == null) return
+        if (!running) loadRect()
+        val v = previewView ?: TransView(ctx).also { previewView = it }
+        v.style(sizeIdx, colorIdx, bgIdx, posIdx == 0)
+        v.setText("هذا نص تجريبي لمعاينة حجم الخط واللون والخلفية")
+        attach(v, false, stripRect(v)) { }
+        ui.removeCallbacks(previewHide)
+        ui.postDelayed(previewHide, 3500L)
     }
 
     fun shutdown() {
@@ -595,6 +682,11 @@ class ScreenTranslator(private val svc: KeyService) {
         running = false
         placing = false
         ui.removeCallbacks(hidePosterRun)
+        ui.removeCallbacks(previewHide)
+        remove(previewView)
+        val rx = screenRx
+        if (rx != null) try { ctx.unregisterReceiver(rx) } catch (e: Exception) { }
+        screenRx = null
         detachBox()
         detachTrans()
         detachPoster()
@@ -643,6 +735,24 @@ class ScreenTranslator(private val svc: KeyService) {
         if (posIdx == 0) return rect
         val h = rect[3] - rect[1]
         return if (rect[1] - h >= 0) intArrayOf(rect[0], rect[1] - h, rect[2], rect[1]) else intArrayOf(rect[0], minOf(sh - h, rect[3]), rect[2], minOf(sh, rect[3] + h))
+    }
+
+    /** The strip's window: [transRect] but taller if the text needs it (grows upward, or downward when it sits below the box). */
+    private fun stripRect(v: TransView): IntArray {
+        val base = transRect()
+        val w = base[2] - base[0]
+        val h = base[3] - base[1]
+        val need = v.needHeight(w)
+        if (need <= h) return base
+        return if (posIdx != 0 && base[1] >= rect[3]) intArrayOf(base[0], base[1], base[2], minOf(sh, base[1] + need))
+        else intArrayOf(base[0], maxOf(0, base[3] - need), base[2], base[3])
+    }
+
+    /** The box in the screenshot's own pixels (the screenshot can have a different resolution from the UI). */
+    private fun boxFor(f: Bitmap): Rect {
+        val kx = f.width.toFloat() / sw
+        val ky = f.height.toFloat() / sh
+        return OcrPrep.clampRect(f, Rect((rect[0] * kx).toInt(), (rect[1] * ky).toInt(), (rect[2] * kx).toInt(), (rect[3] * ky).toInt()))
     }
 
     fun startPlace() {
@@ -788,13 +898,21 @@ class ScreenTranslator(private val svc: KeyService) {
         }
     }
 
+    /** Cover mode on Android 13 and older: reading the original means hiding the strip, so it is done only near a sentence's end. */
+    private fun coverPeek(): Boolean =
+        ocrMode && posIdx == 0 && transAttached && Build.VERSION.SDK_INT < 34 && shownText.isNotEmpty()
+
     private fun requestScan() {
         val w = worker ?: return
         if (scanPending || !running) return
         scanPending = true
-        // OCR mode: next read right after the previous one; backs off while nothing is found (saves CPU)
-        val gap = if (ocrMode) (if (blinkMode && shownText.isNotEmpty()) 800L else if (emptyStreak < 4) 200L else if (emptyStreak < 9) 450L else 900L) else maxOf(500L, lastDur * 3L)
-        val wait = maxOf(0L, gap - (SystemClock.elapsedRealtime() - lastScan))
+        // Screenshots may not come closer than ~333 ms (Android refuses them), so ~380 ms is the fastest loop.
+        val now0 = SystemClock.elapsedRealtime()
+        val since = now0 - lastScan
+        val wait: Long = if (ocrMode) {
+            if (coverPeek()) maxOf(0L, maxOf(380L - since, peekAt - now0))
+            else maxOf(0L, (if (emptyStreak < 12) 380L else 600L) - since)
+        } else maxOf(0L, maxOf(500L, lastDur * 3L) - since)
         w.postDelayed({
             scanPending = false
             val t0 = SystemClock.elapsedRealtime()
@@ -811,6 +929,7 @@ class ScreenTranslator(private val svc: KeyService) {
         val m = svc.mode
         if (m == "full" || m == "standby" || m == "prompt") return
         if (ocrMode && ocrBusy) return
+        if (coverPeek() && SystemClock.elapsedRealtime() < peekAt) return
         val now = SystemClock.elapsedRealtime()
         var text = ""
         if (!ocrMode || now - lastNodeCheck > 3000L) {
@@ -853,7 +972,8 @@ class ScreenTranslator(private val svc: KeyService) {
 
     /** Keeps the shown sentence alive while it is still being read; hides it shortly after it disappears. */
     private fun refreshHide() {
-        val hold = if (ocrMode) minOf(4000L, maxOf(1500L, lastOcrMs * 2L + 700L)) else 1600L
+        var hold = if (ocrMode) minOf(4000L, maxOf(1500L, lastOcrMs * 2L + 700L)) else 1600L
+        if (blinkMode && posIdx == 0) hold = maxOf(hold, maxOf(0L, peekAt - SystemClock.elapsedRealtime()) + 1500L)
         ui.post {
             ui.removeCallbacks(hideRun)
             ui.postDelayed(hideRun, hold)
@@ -871,19 +991,22 @@ class ScreenTranslator(private val svc: KeyService) {
         refreshHide()
         if (lastText.isNotEmpty() && sameText(text, lastText)) {
             stable++
+            if (blinkMode) peekAt = SystemClock.elapsedRealtime() + 700L
             if (stable == 1 && posterOn && lastAr.isNotEmpty() && MovieLookup.looksLikeTitle(lastText)) movie(lastText, lastAr)
             return
         }
         lastText = text
+        firstSeenAt = SystemClock.elapsedRealtime()
         stable = 0
         translate(text)
     }
 
     // ---- OCR path
 
-    private fun shotCallback(cb: (Bitmap?) -> Unit): AccessibilityService.TakeScreenshotCallback {
+    private fun shotCallback(early: (() -> Unit)?, cb: (Bitmap?) -> Unit): AccessibilityService.TakeScreenshotCallback {
         return object : AccessibilityService.TakeScreenshotCallback {
             override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                early?.invoke()          // the picture is already taken: bring the strip back before the slow copy
                 var bmp: Bitmap? = null
                 try {
                     val hb = result.hardwareBuffer
@@ -897,21 +1020,33 @@ class ScreenTranslator(private val svc: KeyService) {
                 cb(bmp)
             }
 
-            override fun onFailure(errorCode: Int) { cb(null) }
+            override fun onFailure(errorCode: Int) {
+                early?.invoke()
+                cb(null)
+            }
         }
     }
 
+    /** Android refuses screenshots less than ~333 ms apart (that silently dropped half of the reads before). */
+    private fun waitShotSlot() {
+        val w = 380L - (SystemClock.elapsedRealtime() - lastShotAt)
+        if (w > 0) try { Thread.sleep(w) } catch (e: Exception) { }
+    }
+
     /** Screenshot of the whole display (Android 11+). The callback gets a software copy or null. */
-    private fun capture(cb: (Bitmap?) -> Unit) {
-        if (Build.VERSION.SDK_INT < 30) { cb(null); return }
+    private fun capture(early: (() -> Unit)? = null, cb: (Bitmap?) -> Unit) {
+        if (Build.VERSION.SDK_INT < 30) { early?.invoke(); cb(null); return }
+        waitShotSlot()
+        lastShotAt = SystemClock.elapsedRealtime()
         try {
-            svc.takeScreenshot(android.view.Display.DEFAULT_DISPLAY, { r -> Thread(r).start() }, shotCallback(cb))
+            svc.takeScreenshot(android.view.Display.DEFAULT_DISPLAY, { r -> Thread(r).start() }, shotCallback(early, cb))
         } catch (e: Exception) {
+            early?.invoke()
             cb(null)
         }
     }
 
-    /** Android 14+: screenshot of the app's own window, so our strip is not in it (no flicker). */
+    /** Android 14+: screenshot of the app's own window, so our strip is not in it (no flicker at all). */
     private fun winShot(cb: (Bitmap?) -> Unit) {
         try {
             var id = -1
@@ -923,29 +1058,30 @@ class ScreenTranslator(private val svc: KeyService) {
                 }
             }
             if (id < 0) { cb(null); return }
+            waitShotSlot()
+            lastShotAt = SystemClock.elapsedRealtime()
             val m = svc.javaClass.getMethod("takeScreenshotOfWindow", Integer.TYPE, Executor::class.java, AccessibilityService.TakeScreenshotCallback::class.java)
-            m.invoke(svc, id, Executor { r -> Thread(r).start() }, shotCallback(cb))
+            m.invoke(svc, id, Executor { r -> Thread(r).start() }, shotCallback(null, cb))
         } catch (e: Throwable) {
             cb(null)
         }
     }
 
-    /** Older Android: hide the strip for the instant of the screenshot, then show it again. */
+    /** Older Android: the strip is hidden only for the instant of the screenshot (~0.1 s), once per sentence end. */
     private fun blinkShot(cb: (Bitmap?) -> Unit) {
         blinkMode = true
+        waitShotSlot()                                   // wait BEFORE hiding the strip
         ui.post { transView?.alpha = 0f }
-        try { Thread.sleep(90) } catch (e: Exception) { }
-        capture { b ->
-            ui.post { transView?.alpha = 1f }
-            cb(b)
-        }
+        ui.postDelayed({ transView?.alpha = 1f }, 1500L) // safety net
+        try { Thread.sleep(45) } catch (e: Exception) { }
+        capture({ ui.post { transView?.alpha = 1f } }) { b -> cb(b) }
     }
 
     /** The picture to read must not contain our own strip when the strip covers the original. */
     private fun captureSmart(cb: (Bitmap?) -> Unit) {
         blinkMode = false
         val cover = posIdx == 0 && transAttached
-        if (!cover) { capture(cb); return }
+        if (!cover) { capture(null, cb); return }
         if (Build.VERSION.SDK_INT >= 34) {
             winShot { b -> if (b != null) cb(b) else blinkShot(cb) }
             return
@@ -960,8 +1096,7 @@ class ScreenTranslator(private val svc: KeyService) {
         ox.execute {
             captureSmart { frame ->
                 if (frame == null) {
-                    ocrBusy = false
-                    onText("")
+                    ocrBusy = false          // a refused screenshot is not "no text"
                 } else {
                     try { processFrame(frame) } catch (e: Throwable) { } finally { frame.recycle(); ocrBusy = false }
                 }
@@ -969,29 +1104,37 @@ class ScreenTranslator(private val svc: KeyService) {
         }
     }
 
-    private var sticky = "Latin"
-    private var lastAlt = 0L
+    /** Scripts, most recently successful first. A language change is found by trying the others right away. */
+    private val mru = arrayListOf("Latin", "Hebrew", "Arabic", "Cyrillic", "Greek")
+    private val sticky: String get() = mru[0]
+    private var lastAltAt = 0L
 
-    /** OCR with the script that worked last time; other scripts are tried (at most every 6 s) when it fails. */
     private fun readWith(bmp: Bitmap, allowAlt: Boolean): String {
-        val r = OcrEngine.recognize(ctx, OcrEngine.files(sticky), bmp) ?: return ""
+        val r = OcrEngine.recognize(ctx, OcrEngine.files(mru[0]), bmp) ?: return ""
         val c = OcrPrep.clean(r.first)
         if (r.second >= 55 && c.length >= 3) return c
         if (!allowAlt) return ""
+        // something that looks like text but was read badly = probably another script: try the others soon
+        var letters = 0
+        for (ch in r.first) if (ch.isLetter()) letters++
         val now = SystemClock.elapsedRealtime()
-        if (now - lastAlt < 6000L) return ""
-        lastAlt = now
-        for (p in OcrEngine.PROFILES) {
-            if (p == sticky) continue
+        if (now - lastAltAt < (if (letters >= 4) 1500L else 6000L)) return ""
+        lastAltAt = now
+        for (i in 1 until mru.size) {
+            val p = mru[i]
             val a = OcrEngine.recognize(ctx, OcrEngine.files(p), bmp) ?: continue
             val ac = OcrPrep.clean(a.first)
-            if (a.second >= 55 && ac.length >= 3) { sticky = p; return ac }
+            if (a.second >= 55 && ac.length >= 3) {
+                mru.removeAt(i)
+                mru.add(0, p)
+                return ac
+            }
         }
         return ""
     }
 
     private fun processFrame(frame: Bitmap) {
-        val box = OcrPrep.clampRect(frame, Rect(rect[0], rect[1], rect[2], rect[3]))
+        val box = boxFor(frame)
         val sig = OcrPrep.sig(frame, box)
         val prev = lastSig
         if (prev != null && OcrPrep.diff(sig, prev) <= 5) {
@@ -1093,10 +1236,11 @@ class ScreenTranslator(private val svc: KeyService) {
         try { latch.await(6, TimeUnit.SECONDS) } catch (e: Exception) { }
         val f = frame
         if (f == null) return sb.append(" | screenshot: FAILED (re-enable the accessibility service once)").toString()
-        sb.append(" | screenshot ").append(f.width).append("x").append(f.height).append(" boxLuma=").append(OcrPrep.avgLuma(f, r))
+        sb.append(" | screenshot ").append(f.width).append("x").append(f.height).append(" boxLuma=").append(OcrPrep.avgLuma(f, boxFor(f)))
         sb.append(" | engine=").append(if (OcrEngine.available) "included" else "MISSING")
         if (OcrEngine.available) {
-            val box = OcrPrep.clampRect(f, r)
+            val box = boxFor(f)
+            sb.append(" | box=").append(rect[0]).append(",").append(rect[1]).append(",").append(rect[2]).append(",").append(rect[3]).append(" (only this area is read)")
             val bmps = ArrayList<Bitmap>()
             for (mode in 0..1) { val b = OcrPrep.prepare(f, box, mode); if (b != null) bmps.add(b) }
             if (bmps.isEmpty()) sb.append(" | no text-like pixels in the box")
@@ -1155,7 +1299,7 @@ class ScreenTranslator(private val svc: KeyService) {
     private fun relayoutTrans() {
         val v = transView ?: return
         if (v.parent == null) return
-        try { (ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).updateViewLayout(v, lp(transRect(), false)) } catch (e: Exception) { }
+        try { (ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).updateViewLayout(v, lp(stripRect(v), false)) } catch (e: Exception) { }
     }
 
     private fun remove(v: View?) {
@@ -1175,7 +1319,11 @@ class ScreenTranslator(private val svc: KeyService) {
         v.style(sizeIdx, colorIdx, bgIdx, posIdx == 0)
         v.setText(ar)
         v.alpha = 1f
-        attach(v, false, transRect()) { transAttached = it }
+        attach(v, false, stripRect(v)) { transAttached = it }
+        // next look at the original (cover mode, older Android): just before the sentence is expected to end
+        val now = SystemClock.elapsedRealtime()
+        val dur = (1100 + 45 * lastText.length).coerceIn(1500, 5000)
+        peekAt = maxOf(now + 600L, firstSeenAt + dur)
     }
 
     private fun hideTrans() {
