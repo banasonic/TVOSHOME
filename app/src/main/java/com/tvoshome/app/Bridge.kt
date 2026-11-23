@@ -114,6 +114,22 @@ class Bridge(private val svc: KeyService) {
         svc.logoConfig()
     }
     @JavascriptInterface fun transPlace() { svc.transPlace() }
+    @JavascriptInterface fun setAudio(on: Boolean, ask: Boolean) {
+        Prefs.setAudioOn(ctx, on)
+        svc.audioConfig(ask)
+    }
+    @JavascriptInterface fun audioStart() { svc.audioConfig(true) }
+    @JavascriptInterface fun setAudioSource(v: Int) {
+        Prefs.setAudioSrc(ctx, v)
+        svc.audioConfig(false)
+    }
+    @JavascriptInterface fun audioStatus(): String =
+        "android=" + android.os.Build.VERSION.SDK_INT + " | speech engine=" + (if (VoskEngine.available) "included" else "MISSING") +
+            " | model=" + (if (VoskModelStore.ready(ctx)) "ready" else "not downloaded") + " | listening=" + AudioHub.running + " | audio inputs on this device=" + AudioSources.describe(ctx) + " | " + AudioHub.status
+    @JavascriptInterface fun setTransLangs(mask: Int) {
+        Prefs.setTransLangMask(ctx, mask)
+        svc.logoConfig()
+    }
     @JavascriptInterface fun transTest() { svc.transTestLater() }
     @JavascriptInterface fun matchEdit() { svc.matchEdit() }
     @JavascriptInterface fun matchReset() { svc.matchReset() }

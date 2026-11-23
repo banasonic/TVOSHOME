@@ -58,6 +58,7 @@ class KeyService : AccessibilityService() {
     private var cover: LogoCover? = null
     private var matchW: MatchWatcher? = null
     private var trans: ScreenTranslator? = null
+    private var audio: AudioTranslator? = null
 
     /** Matches are fetched on a schedule in the background (never while the cards are open). */
     private val matchRun = object : Runnable {
@@ -161,6 +162,14 @@ class KeyService : AccessibilityService() {
         }
     }
 
+    /** Settings: audio translation on/off; [ask] = open the permission screens now. */
+    fun audioConfig(ask: Boolean) {
+        ui.post {
+            val au = audio ?: AudioTranslator(this).also { audio = it }
+            au.configure(ask)
+        }
+    }
+
     /** Settings: (re)place the translation box. */
     fun transPlace() {
         ui.post { trans?.startPlace() }
@@ -220,6 +229,8 @@ class KeyService : AccessibilityService() {
             c.configure()
             val t = trans ?: ScreenTranslator(this).also { trans = it }
             t.configure()
+            val au = audio ?: AudioTranslator(this).also { audio = it }
+            au.configure(false)
         }
     }
 
@@ -252,6 +263,7 @@ class KeyService : AccessibilityService() {
             cover?.shutdown()
             matchW?.card?.shutdown()
             trans?.shutdown()
+            audio?.shutdown()
             detach()
         }
         return super.onUnbind(intent)
@@ -431,6 +443,7 @@ class KeyService : AccessibilityService() {
         cover?.onMode(mode)
         matchW?.card?.onMode(mode)
         trans?.onMode(mode)
+        audio?.onMode(mode)
     }
 
     fun toggle() {

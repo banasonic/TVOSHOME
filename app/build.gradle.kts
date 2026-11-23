@@ -50,8 +50,23 @@ val ocrCandidates = listOf(
 val ocrDep = ocrCandidates.firstOrNull { urlExists(it.second) }
 println("OCR dependency: " + (ocrDep?.first ?: "NONE (OCR disabled in this build)"))
 
+// Offline speech recognition (Vosk): same idea, optional.
+val voskCandidates = listOf(
+    "com.alphacephei:vosk-android:0.3.47" to central + "com/alphacephei/vosk-android/0.3.47/vosk-android-0.3.47.pom",
+    "com.alphacephei:vosk-android:0.3.45" to central + "com/alphacephei/vosk-android/0.3.45/vosk-android-0.3.45.pom",
+    "com.alphacephei:vosk-android:0.3.47" to "https://alphacephei.com/maven/com/alphacephei/vosk-android/0.3.47/vosk-android-0.3.47.pom",
+    "com.alphacephei:vosk-android:0.3.45" to "https://alphacephei.com/maven/com/alphacephei/vosk-android/0.3.45/vosk-android-0.3.45.pom"
+)
+val voskDep = voskCandidates.firstOrNull { urlExists(it.second) }
+val jnaOk = urlExists(central + "net/java/dev/jna/jna/5.13.0/jna-5.13.0.aar")
+println("Vosk dependency: " + (voskDep?.first ?: "NONE (audio translate disabled in this build)") + " | jna aar: " + jnaOk)
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.webkit:webkit:1.11.0")
     if (ocrDep != null) implementation(ocrDep.first)
+    if (voskDep != null && jnaOk) {
+        implementation(voskDep.first) { exclude(group = "net.java.dev.jna", module = "jna") }
+        implementation("net.java.dev.jna:jna:5.13.0@aar")
+    }
 }

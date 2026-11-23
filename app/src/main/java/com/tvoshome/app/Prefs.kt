@@ -77,6 +77,12 @@ object Prefs {
     fun transColor(c: Context): Int = sp(c).getInt("tr_color", 0)
     fun transBg(c: Context): Int = sp(c).getInt("tr_bg", 0)
     fun transPoster(c: Context): Boolean = sp(c).getBoolean("tr_poster", true)
+    fun transLangMask(c: Context): Int = sp(c).getInt("tr_langmask", 2047)
+    fun setTransLangMask(c: Context, m: Int) { sp(c).edit().putInt("tr_langmask", if ((m and 2047) == 0) 1 else (m and 2047)).apply() }
+    fun audioSrc(c: Context): Int = sp(c).getInt("audio_src", 0)
+    fun setAudioSrc(c: Context, v: Int) { sp(c).edit().putInt("audio_src", v.coerceIn(0, 3)).apply() }
+    fun audioOn(c: Context): Boolean = sp(c).getBoolean("audio_on", false)
+    fun setAudioOn(c: Context, on: Boolean) { sp(c).edit().putBoolean("audio_on", on).apply() }
     fun transOcr(c: Context): Boolean = sp(c).getBoolean("tr_ocr", true)
     fun transLang(c: Context): Int = sp(c).getInt("tr_lang", 0)
     fun transPos(c: Context): Int = sp(c).getInt("tr_pos", 0)
