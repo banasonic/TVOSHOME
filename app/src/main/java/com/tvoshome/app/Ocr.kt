@@ -93,13 +93,14 @@ object OcrEngine {
         return ok
     }
 
-    @Synchronized
+    private val lock = Any()
+
+    /** The caller holds [lock]. */
     private fun get(ctx: Context, list: List<String>): Any? {
         val key = list.joinToString("+")
         val a = api
         if (a != null && loaded == key) return a
-        release()
-        if (!ensure(ctx, list)) return null
+        releaseLocked()
         return try {
             val t = cls!!.getDeclaredConstructor().newInstance()
             val ok = m("init", String::class.java, String::class.java).invoke(t, root(ctx).absolutePath, key) as? Boolean ?: false
@@ -119,28 +120,34 @@ object OcrEngine {
         }
     }
 
-    @Synchronized
-    fun release() {
+    private fun releaseLocked() {
         val a = api
         if (a != null) try { m(if (legacy) "end" else "recycle").invoke(a) } catch (e: Throwable) { }
         api = null
         loaded = ""
     }
 
+    /** May wait for a running read: never call it from the UI thread. */
+    fun release() {
+        synchronized(lock) { releaseLocked() }
+    }
+
     /** (text, mean confidence 0..100) or null when the engine is unavailable. */
-    @Synchronized
     fun recognize(ctx: Context, list: List<String>, bmp: Bitmap): Pair<String, Int>? {
-        val t = get(ctx, list) ?: return null
-        lastUse = System.currentTimeMillis()
-        return try {
-            m("setImage", Bitmap::class.java).invoke(t, bmp)
-            val txt = m("getUTF8Text").invoke(t) as? String ?: ""
-            val conf = m("meanConfidence").invoke(t) as? Int ?: 0
-            m("clear").invoke(t)
-            Pair(txt.trim(), conf)
-        } catch (e: Throwable) {
-            status = "ocr error: " + e.javaClass.simpleName
-            null
+        if (!ensure(ctx, list)) return null            // a download is never done while holding the lock
+        synchronized(lock) {
+            val t = get(ctx, list) ?: return null
+            lastUse = System.currentTimeMillis()
+            return try {
+                m("setImage", Bitmap::class.java).invoke(t, bmp)
+                val txt = m("getUTF8Text").invoke(t) as? String ?: ""
+                val conf = m("meanConfidence").invoke(t) as? Int ?: 0
+                m("clear").invoke(t)
+                Pair(txt.trim(), conf)
+            } catch (e: Throwable) {
+                status = "ocr error: " + e.javaClass.simpleName
+                null
+            }
         }
     }
 }
@@ -182,18 +189,16 @@ object OcrPrep {
         return s / g.size
     }
 
-    /**
-     * Crops the box, scales it to a sensible size and keeps only the text colour
-     * (mode 0: bright text such as subtitles, mode 1: dark text) as black on white.
-     * Returns null when the box does not contain a plausible amount of "text pixels".
-     */
-    fun prepare(frame: Bitmap, r0: Rect, mode: Int): Bitmap? {
+    class Gray(val px: IntArray, val w: Int, val h: Int)
+
+    /** The box as a brightness image (at most 1100 px wide). */
+    fun gray(frame: Bitmap, r0: Rect): Gray? {
         val r = clampRect(frame, r0)
         val w = r.width()
         val h = r.height()
         if (w < 20 || h < 12) return null
         val crop = Bitmap.createBitmap(frame, r.left, r.top, w, h)
-        val scale = if (w > 800) 800f / w else if (h < 60) 2f else 1f
+        val scale = if (w > 1100) 1100f / w else 1f
         val sw = maxOf(8, (w * scale).toInt())
         val sh = maxOf(8, (h * scale).toInt())
         val sc = if (scale != 1f) Bitmap.createScaledBitmap(crop, sw, sh, true) else crop
@@ -201,38 +206,113 @@ object OcrPrep {
         sc.getPixels(px, 0, sw, 0, 0, sw, sh)
         if (sc !== crop) sc.recycle()
         crop.recycle()
+        for (i in px.indices) px[i] = luma(px[i])
+        return Gray(px, sw, sh)
+    }
+
+    /**
+     * Text pixels as black on white. mode 0: automatic (the smaller of the two brightness groups is the text, so light
+     * text on dark video and dark text on a light background both work); 1: darker than its surroundings; 2: brighter
+     * than its surroundings (these two cope with gradients and mid-tone text). Null when the box has no plausible text.
+     */
+    fun binarize(g: Gray, mode: Int): Bitmap? {
+        val w = g.w
+        val h = g.h
+        val n = w * h
+        val src = g.px
+        val text = BooleanArray(n)
         var cnt = 0
-        for (i in px.indices) {
-            val l = luma(px[i])
-            val t = if (mode == 0) l >= 180 else l <= 70
-            if (t) { px[i] = 0xFF000000.toInt(); cnt++ } else px[i] = 0xFFFFFFFF.toInt()
+        if (mode == 0) {
+            val hist = IntArray(256)
+            for (v in src) hist[v]++
+            var sum = 0L
+            for (i in 0..255) sum += i.toLong() * hist[i]
+            var wB = 0L
+            var sumB = 0L
+            var best = 0.0
+            var thr = 128
+            for (t in 0..255) {
+                wB += hist[t]
+                if (wB == 0L) continue
+                val wF = n - wB
+                if (wF == 0L) break
+                sumB += t.toLong() * hist[t]
+                val mB = sumB.toDouble() / wB
+                val mF = (sum - sumB).toDouble() / wF
+                val between = wB.toDouble() * wF * (mB - mF) * (mB - mF)
+                if (between > best) { best = between; thr = t }
+            }
+            var below = 0
+            for (v in src) if (v <= thr) below++
+            val darkIsText = below * 2 <= n
+            for (i in 0 until n) {
+                val t = if (darkIsText) src[i] <= thr else src[i] > thr
+                text[i] = t
+                if (t) cnt++
+            }
+        } else {
+            val iw = w + 1
+            val integ = IntArray(iw * (h + 1))
+            for (y in 0 until h) {
+                var row = 0
+                for (x in 0 until w) {
+                    row += src[y * w + x]
+                    integ[(y + 1) * iw + x + 1] = integ[y * iw + x + 1] + row
+                }
+            }
+            val r = maxOf(8, minOf(h / 3, 30))
+            for (y in 0 until h) {
+                val y0 = maxOf(0, y - r)
+                val y1 = minOf(h, y + r + 1)
+                for (x in 0 until w) {
+                    val x0 = maxOf(0, x - r)
+                    val x1 = minOf(w, x + r + 1)
+                    val s = integ[y1 * iw + x1] - integ[y0 * iw + x1] - integ[y1 * iw + x0] + integ[y0 * iw + x0]
+                    val mean = s / ((x1 - x0) * (y1 - y0))
+                    val v = src[y * w + x]
+                    val t = if (mode == 1) v < mean - 14 else v > mean + 22
+                    text[y * w + x] = t
+                    if (t) cnt++
+                }
+            }
         }
-        val frac = cnt.toFloat() / px.size
-        if (frac < 0.004f || frac > 0.35f) return null
+        val frac = cnt.toFloat() / n
+        if (frac < 0.004f || frac > 0.32f) return null
         // keep only the rows / columns that really hold text: a smaller image is read much faster
-        val rowC = IntArray(sh)
-        val colC = IntArray(sw)
-        for (y in 0 until sh) for (x in 0 until sw) if (px[y * sw + x] == 0xFF000000.toInt()) { rowC[y]++; colC[x]++ }
-        val minRow = maxOf(2, sw / 250)
-        val minCol = maxOf(1, sh / 60)
+        val rowC = IntArray(h)
+        val colC = IntArray(w)
+        for (y in 0 until h) for (x in 0 until w) if (text[y * w + x]) { rowC[y]++; colC[x]++ }
+        val minRow = maxOf(2, w / 250)
+        val minCol = maxOf(1, h / 60)
         var y0 = 0
-        while (y0 < sh && rowC[y0] < minRow) y0++
-        var y1 = sh - 1
+        while (y0 < h && rowC[y0] < minRow) y0++
+        var y1 = h - 1
         while (y1 > y0 && rowC[y1] < minRow) y1--
         var x0 = 0
-        while (x0 < sw && colC[x0] < minCol) x0++
-        var x1 = sw - 1
+        while (x0 < w && colC[x0] < minCol) x0++
+        var x1 = w - 1
         while (x1 > x0 && colC[x1] < minCol) x1--
         val cw = x1 - x0 + 1
         val ch = y1 - y0 + 1
         if (cw < 16 || ch < 8) return null
         val pad = 8
         val sub = IntArray(cw * ch)
-        for (y in 0 until ch) System.arraycopy(px, (y0 + y) * sw + x0, sub, y * cw, cw)
-        val out = Bitmap.createBitmap(cw + pad * 2, ch + pad * 2, Bitmap.Config.ARGB_8888)
+        for (y in 0 until ch) for (x in 0 until cw) sub[y * cw + x] = if (text[(y0 + y) * w + x0 + x]) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+        var out = Bitmap.createBitmap(cw + pad * 2, ch + pad * 2, Bitmap.Config.ARGB_8888)
         out.eraseColor(0xFFFFFFFF.toInt())
         out.setPixels(sub, 0, cw, pad, pad, cw, ch)
+        if (ch < 28) {                       // very small text reads badly: enlarge it
+            val big = Bitmap.createScaledBitmap(out, out.width * 2, out.height * 2, true)
+            out.recycle()
+            out = big
+        }
         return out
+    }
+
+    /** Compatibility: gray + binarize in one step. */
+    fun prepare(frame: Bitmap, r0: Rect, mode: Int): Bitmap? {
+        val g = gray(frame, r0) ?: return null
+        return binarize(g, mode)
     }
 
     /** Drops lines that are mostly noise. */

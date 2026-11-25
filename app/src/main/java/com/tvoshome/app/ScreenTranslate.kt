@@ -710,7 +710,7 @@ class ScreenTranslator(private val svc: KeyService) {
         scanPending = false
         lastText = ""
         shownText = ""
-        OcrEngine.release()
+        Thread { OcrEngine.release() }.start()      // never wait for a running read on the UI thread
     }
 
     // ---------------------------------------------------------------- placing the box
@@ -866,7 +866,7 @@ class ScreenTranslator(private val svc: KeyService) {
         emptyStreak = 0
         worker?.removeCallbacks(pollRun)
         worker?.postDelayed(pollRun, 800L)
-        warmUp()
+        worker?.postDelayed({ warmUp() }, 15000L)    // not while the app is still starting
         requestScan()
     }
 
@@ -882,11 +882,13 @@ class ScreenTranslator(private val svc: KeyService) {
                 b.recycle()
             } catch (e: Throwable) { }
         }
-        Thread {
+        val dl = Thread {
             try {
                 for (p in mru.toList()) if (p != mru[0]) OcrEngine.ensure(ctx, OcrEngine.files(p))
             } catch (e: Throwable) { }
-        }.start()
+        }
+        dl.priority = Thread.MIN_PRIORITY
+        dl.start()
     }
 
     /** Window events from anywhere on screen: they matter only when the box is read as real text (never for the picture). */
@@ -1097,17 +1099,20 @@ class ScreenTranslator(private val svc: KeyService) {
         }
         lastSig = sig
         val t0 = SystemClock.elapsedRealtime()
-        // polarity (bright / dark text) that worked last time goes first; the other one only if it finds nothing
-        val order = if (stickyMode == 0) intArrayOf(0, 1) else intArrayOf(1, 0)
+        // the way the text is separated from the background that worked last time goes first
+        val g = OcrPrep.gray(frame, box)
+        val order = intArrayOf(stickyMode, (stickyMode + 1) % 3, (stickyMode + 2) % 3)
         val bmps = ArrayList<Bitmap>()
         var best = ""
-        for (m in order) {
-            val b = OcrPrep.prepare(frame, box, m) ?: continue
-            bmps.add(b)
-            best = readWith(b, false)
-            if (best.isNotEmpty()) { stickyMode = m; break }
+        if (g != null) {
+            for (m in order) {
+                val b = OcrPrep.binarize(g, m) ?: continue
+                bmps.add(b)
+                best = readWith(b, false)
+                if (best.isNotEmpty()) { stickyMode = m; break }
+            }
+            if (best.isEmpty() && bmps.isNotEmpty()) best = readWith(bmps[0], true)
         }
-        if (best.isEmpty() && bmps.isNotEmpty()) best = readWith(bmps[0], true)
         for (b in bmps) b.recycle()
         lastOcrMs = SystemClock.elapsedRealtime() - t0
         lastOcrText = best
@@ -1202,7 +1207,7 @@ class ScreenTranslator(private val svc: KeyService) {
             val box = boxFor(f)
             sb.append(" | box=").append(rect[0]).append(",").append(rect[1]).append(",").append(rect[2]).append(",").append(rect[3]).append(" (only this area is read)")
             val bmps = ArrayList<Bitmap>()
-            for (mode in 0..1) { val b = OcrPrep.prepare(f, box, mode); if (b != null) bmps.add(b) }
+            for (mode in 0..2) { val b = OcrPrep.prepare(f, box, mode); if (b != null) bmps.add(b) }
             if (bmps.isEmpty()) sb.append(" | no text-like pixels in the box")
             for (pf in mru.toList()) {
                 var bestConf = -1

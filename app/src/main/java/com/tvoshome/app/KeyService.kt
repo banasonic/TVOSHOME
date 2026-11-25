@@ -1,6 +1,7 @@
 package com.tvoshome.app
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -164,6 +165,10 @@ class KeyService : AccessibilityService() {
 
     /** Settings: audio translation on/off; [ask] = open the permission screens now. */
     fun audioConfig(ask: Boolean) {
+        if (!ask) {
+            logoConfig()
+            return
+        }
         ui.post {
             val au = audio ?: AudioTranslator(this).also { audio = it }
             au.configure(ask)
@@ -221,23 +226,50 @@ class KeyService : AccessibilityService() {
     }
 
     /** Applies the channel-logo cover option (settings changed or service started). */
+    /**
+     * The service listens to window-content events (costly for the whole system) only while a feature that needs
+     * them is on; otherwise it asks for window-state events only.
+     */
+    private fun updateServiceInfo() {
+        try {
+            val info = serviceInfo ?: return
+            val scan = Prefs.logoOn(this) || Prefs.matchOn(this) || Prefs.transOn(this)
+            if (scan) {
+                info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or AccessibilityEvent.TYPE_WINDOWS_CHANGED
+                info.flags = AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS or AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                info.notificationTimeout = 250
+            } else {
+                info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                info.flags = AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+                info.notificationTimeout = 100
+            }
+            serviceInfo = info
+        } catch (e: Exception) { }
+    }
+
+    private val cfgRun = Runnable {
+        updateServiceInfo()
+        val m = matchW ?: MatchWatcher(this).also { matchW = it }
+        m.configure()
+        val c = cover ?: LogoCover(this).also { cover = it }
+        c.configure()
+        val t = trans ?: ScreenTranslator(this).also { trans = it }
+        t.configure()
+        val au = audio ?: AudioTranslator(this).also { audio = it }
+        au.configure(false)
+    }
+
+    /** Many settings arrive together at start-up: they are applied once, shortly after. */
     fun logoConfig() {
-        ui.post {
-            val m = matchW ?: MatchWatcher(this).also { matchW = it }
-            m.configure()
-            val c = cover ?: LogoCover(this).also { cover = it }
-            c.configure()
-            val t = trans ?: ScreenTranslator(this).also { trans = it }
-            t.configure()
-            val au = audio ?: AudioTranslator(this).also { audio = it }
-            au.configure(false)
-        }
+        ui.removeCallbacks(cfgRun)
+        ui.postDelayed(cfgRun, 350L)
     }
 
     /** HOME pressed while StandBy / prompt is showing -> leave it (HOME never reaches onKeyEvent). */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            if (event.packageName?.toString() == packageName) return      // our own overlay animates constantly
             cover?.onContent(event.packageName?.toString())
             trans?.onChange()
             return

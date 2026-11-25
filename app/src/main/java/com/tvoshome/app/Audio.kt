@@ -45,6 +45,32 @@ object AudioHub {
     @Volatile var status = ""
     @Volatile var plan = ""
     @Volatile var listener: ((String, Boolean) -> Unit)? = null
+    /** Short Arabic messages shown on screen so you can see what is happening. */
+    @Volatile var say: ((String) -> Unit)? = null
+    @Volatile private var cachedModel: Any? = null
+
+    /** Loads the speech model once (it takes a while on small boxes); loading also happens while the permission dialog is open. */
+    @Synchronized
+    fun preload(ctx: Context) {
+        if (cachedModel != null || !VoskEngine.available) return
+        if (!VoskModelStore.ensure(ctx)) return
+        status = "loading the speech model"
+        cachedModel = VoskEngine.loadModel(VoskModelStore.dir(ctx).absolutePath)
+        if (cachedModel != null) status = "speech model loaded"
+    }
+
+    @Synchronized
+    fun takeModel(): Any? {
+        val m = cachedModel
+        cachedModel = null
+        return m
+    }
+
+    @Synchronized
+    fun releaseModel() {
+        VoskEngine.close(cachedModel)
+        cachedModel = null
+    }
 }
 
 /**
@@ -488,16 +514,22 @@ class AudioCaptureService : Service() {
         AudioHub.running = true
         try {
             if (!VoskEngine.available) { AudioHub.status = "speech engine is not included in this build"; return }
-            if (!VoskModelStore.ensure(applicationContext)) return
-            AudioHub.status = "loading the speech model"
-            model = VoskEngine.loadModel(VoskModelStore.dir(applicationContext).absolutePath) ?: return
+            AudioHub.say?.invoke("جاري تحميل نموذج الصوت… قد يستغرق دقيقة في أول مرة")
+            AudioHub.preload(applicationContext)
+            model = AudioHub.takeModel()
+            if (model == null) {
+                AudioHub.say?.invoke("تعذر تحميل نموذج الصوت")
+                return
+            }
             recog = VoskEngine.recognizer(model, 16000f) ?: return
             rec = openRecord(plan)
             if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) {
                 AudioHub.status = "could not open the audio input (" + plan + "). inputs: " + AudioSources.describe(applicationContext)
+                AudioHub.say?.invoke("تعذر فتح مصدر الصوت")
                 return
             }
             rec.startRecording()
+            AudioHub.say?.invoke("الاستماع للصوت يعمل الآن")
             AudioHub.status = "listening (" + plan + ")"
             val gate = SpeechGate()
             val buf = ShortArray(1600)
@@ -551,7 +583,7 @@ class AudioCaptureService : Service() {
                 // some apps block capture: the stream is then pure digital silence
                 var peak = 0
                 for (i in 0 until got) { val a = Math.abs(buf[i].toInt()); if (a > peak) peak = a }
-                if (peak == 0) { if (++silentReads == 150) AudioHub.status = "listening (" + plan + "), but only silence arrives (the app or the TV path does not allow capture)" } else {
+                if (peak == 0) { if (++silentReads == 150) { AudioHub.status = "listening (" + plan + "), but only silence arrives (the app or the TV path does not allow capture)"; AudioHub.say?.invoke("لا يصل أي صوت: التطبيق أو مصدر البث لا يسمح بالتقاط الصوت") } } else {
                     if (silentReads >= 150) AudioHub.status = "listening (" + plan + ")"
                     silentReads = 0
                 }
@@ -700,20 +732,25 @@ class AudioTranslator(private val svc: KeyService) {
         enabled = true
         if (exec == null) exec = Executors.newSingleThreadExecutor()
         AudioHub.listener = { t, f -> onSpeech(t, f) }
+        AudioHub.say = { m -> ui.post { showText(m, 4500L) } }
         if (!VoskEngine.available) {
             AudioHub.status = "speech engine is not included in this build"
             return
         }
-        if (!preloading && !VoskModelStore.ready(ctx)) {
-            preloading = true
-            Thread {
-                VoskModelStore.ensure(ctx)
-                preloading = false
-            }.start()
-        }
+        if (!ask) return
         val plan = AudioSources.plan(ctx, Prefs.audioSrc(ctx))
         AudioHub.plan = ""
-        if (ask && !AudioHub.running && plan != "none") {
+        if (plan == "none") {
+            ui.post { showText("لا يوجد مصدر صوت متاح — افتح Status في الإعدادات", 5000L) }
+            return
+        }
+        if (!AudioHub.running) {
+            if (!preloading) {
+                preloading = true
+                val th = Thread { try { AudioHub.preload(ctx) } finally { preloading = false } }
+                th.priority = Thread.NORM_PRIORITY - 1
+                th.start()
+            }
             val i = Intent(ctx, AudioPermActivity::class.java)
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             try { ctx.startActivity(i) } catch (e: Exception) { AudioHub.status = "could not open the permission screen" }
@@ -723,6 +760,8 @@ class AudioTranslator(private val svc: KeyService) {
     fun stop() {
         enabled = false
         AudioHub.listener = null
+        AudioHub.say = null
+        Thread { AudioHub.releaseModel() }.start()
         try { ctx.stopService(Intent(ctx, AudioCaptureService::class.java)) } catch (e: Exception) { }
         ui.post { detach() }
         exec?.shutdownNow()
@@ -757,6 +796,10 @@ class AudioTranslator(private val svc: KeyService) {
     }
 
     private fun show(ar: String, final: Boolean, chars: Int) {
+        showText(ar, (if (final) (2200 + 60 * chars).coerceIn(2500, 7000) else 2500).toLong())
+    }
+
+    private fun showText(ar: String, holdMs: Long) {
         val m = svc.mode
         if (m == "full" || m == "standby" || m == "prompt") return
         val dm = DisplayMetrics()
@@ -791,9 +834,8 @@ class AudioTranslator(private val svc: KeyService) {
             attached = false
         }
         shown = ar
-        val hold = if (final) (2200 + 60 * chars).coerceIn(2500, 7000) else 2500
         ui.removeCallbacks(hideRun)
-        ui.postDelayed(hideRun, hold.toLong())
+        ui.postDelayed(hideRun, holdMs)
     }
 
     private fun detach() {
