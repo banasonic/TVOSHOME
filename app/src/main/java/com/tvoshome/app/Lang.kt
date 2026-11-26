@@ -57,12 +57,36 @@ object LangDetect {
         return out
     }
 
-    /** Language code for the translator, or null = let the translator guess. */
-    fun detect(text: String, mask: Int, current: String?): String? {
+    class Det(val code: String?, val score: Int)
+
+    fun enabledCount(mask: Int): Int {
+        var n = 0
+        for (i in CODES.indices) if (((mask shr i) and 1) == 1) n++
+        return n
+    }
+
+    /** Serbian, Croatian and Bosnian are told apart only on paper: any of them stands for the others. */
+    private val CLUSTER = setOf("sr", "hr", "bs", "sh", "cnr")
+
+    /** The selected language that a translator's detected language ("hr", "sr-Latn", "sh" ...) corresponds to, or null. */
+    fun canonical(src: String, mask: Int): String? {
+        if (src.isEmpty()) return null
+        val s = src.lowercase().substringBefore('-')
+        if (isEnabled(s, mask)) return s
+        if (s in CLUSTER) for (c in arrayOf("sr", "hr", "bs")) if (isEnabled(c, mask)) return c
+        return null
+    }
+
+    fun accepts(src: String, mask: Int): Boolean = canonical(src, mask) != null
+
+    fun detect(text: String, mask: Int, current: String?): String? = detectScored(text, mask, current).code
+
+    /** Language among the selected ones, with how much evidence supports it (0 = none). */
+    fun detectScored(text: String, mask: Int, current: String?): Det {
         var letters = 0
         var cyr = 0
         for (ch in text) if (ch.isLetter()) { letters++; if (ch.code in 0x0400..0x04FF) cyr++ }
-        if (letters < 3) return current
+        if (letters < 3) return Det(current, 0)
         val cyrMode = cyr * 2 > letters
         val cand = ArrayList<Int>()
         for (i in CODES.indices) {
@@ -71,8 +95,8 @@ object LangDetect {
             if (!cyrMode && i == BG) continue
             cand.add(i)
         }
-        if (cand.isEmpty()) return null
-        if (cand.size == 1) return CODES[cand[0]]
+        if (cand.isEmpty()) return Det(null, 0)
+        if (cand.size == 1) return Det(CODES[cand[0]], 0)
         val lower = text.lowercase()
         val words = lower.split(SPLIT).filter { it.isNotEmpty() }
         val score = IntArray(CODES.size)
@@ -94,12 +118,12 @@ object LangDetect {
         for (i in cand) if (score[i] > score[best]) best = i
         val curIdx = if (current == null) -1 else CODES.indexOf(current)
         val curOk = curIdx >= 0 && cand.contains(curIdx)
-        if (score[best] < 2) return if (curOk) CODES[curIdx] else null
+        if (score[best] < 2) return if (curOk) Det(CODES[curIdx], score[curIdx]) else Det(null, 0)
         if (curOk && curIdx != best) {
             val inCluster = (best == SR || best == HR || best == BS) && (curIdx == SR || curIdx == HR || curIdx == BS)
-            if (inCluster) return CODES[curIdx]                       // Serbian / Croatian / Bosnian read the same way
-            if (score[best].toFloat() < score[curIdx] * 1.4f + 1f) return CODES[curIdx]   // keep the language until the evidence is clear
+            if (inCluster) return Det(CODES[curIdx], score[curIdx])
+            if (score[best].toFloat() < score[curIdx] * 1.4f + 1f) return Det(CODES[curIdx], score[curIdx])
         }
-        return CODES[best]
+        return Det(CODES[best], score[best])
     }
 }

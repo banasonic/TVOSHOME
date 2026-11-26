@@ -39,20 +39,34 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.ArrayDeque
+import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executors
 
-/** Free translation (Google's public web endpoint, no key) with a small cache and a kept-alive connection. */
+/** A translation and the language it was translated from ("" = unknown). */
+class TrResult(val ar: String, val src: String)
+
+/**
+ * Free translation to Arabic from several public services (no keys). The fastest healthy one is asked first; if it
+ * is slow, the next one is asked at the same time; a service that fails is skipped for a while, so a blocked source
+ * does not stop the translation.
+ */
 object Translator {
-    private val cache = object : LinkedHashMap<String, String>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 80
+    private val cache = object : LinkedHashMap<String, TrResult>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, TrResult>?): Boolean = size > 150
     }
-    private var lastReq = 0L
     @Volatile var lastDetected = ""
     private const val UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    private val pool: ExecutorService = Executors.newCachedThreadPool { r ->
+        val t = Thread(r, "tr-net")
+        t.isDaemon = true
+        t
+    }
 
     fun arabicRatio(t: String): Float {
         var ar = 0
@@ -61,66 +75,219 @@ object Translator {
         return if (all == 0) 0f else ar.toFloat() / all
     }
 
-    /** GET that leaves the connection open for reuse (a new TLS handshake on every request costs hundreds of ms). */
-    private fun fetch(url: String): String? {
+    private fun enc(t: String): String = URLEncoder.encode(t, "UTF-8")
+
+    /** HTTP that keeps the connection open for reuse (a new TLS handshake costs hundreds of ms). Throws on any failure. */
+    private fun http(url: String, method: String = "GET", body: String? = null, headers: Map<String, String> = emptyMap()): String {
+        val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        c.connectTimeout = 4000
+        c.readTimeout = 6000
+        c.requestMethod = method
+        c.setRequestProperty("User-Agent", UA)
+        c.setRequestProperty("Connection", "keep-alive")
+        for ((k, v) in headers) c.setRequestProperty(k, v)
+        if (body != null) {
+            c.doOutput = true
+            c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        }
+        val code = c.responseCode
+        if (code !in 200..299) {
+            try { c.errorStream?.close() } catch (e: Exception) { }
+            throw java.io.IOException("http " + code)
+        }
+        return c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+    }
+
+    // ------------------------------------------------------------------ the services
+
+    private fun google(text: String, sl: String?): TrResult? {
+        val arr = JSONArray(http("https://translate.googleapis.com/translate_a/single?client=gtx&sl=" + (sl ?: "auto") + "&tl=ar&dt=t&q=" + enc(text)))
+        val segs = arr.getJSONArray(0)
+        val sb = StringBuilder()
+        for (i in 0 until segs.length()) {
+            val sg = segs.optJSONArray(i) ?: continue
+            sb.append(sg.optString(0, ""))
+        }
+        val src = arr.optString(2, sl ?: "")
+        return TrResult(if (src == "ar") "" else sb.toString().trim(), src)
+    }
+
+    private fun google2(text: String, sl: String?): TrResult? {
+        val a = JSONArray(http("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=" + (sl ?: "auto") + "&tl=ar&q=" + enc(text)))
+        val e0 = a.opt(0)
+        var t = ""
+        var src = sl ?: ""
+        if (e0 is JSONArray) { t = e0.optString(0, ""); if (e0.optString(1, "").isNotEmpty()) src = e0.optString(1, "") } else if (e0 is String) t = e0
+        if (t.isEmpty()) return null
+        return TrResult(if (src == "ar") "" else t.trim(), src)
+    }
+
+    private var msToken = ""
+    private var msTokenAt = 0L
+
+    private fun microsoft(text: String, sl: String?): TrResult? {
+        val now = SystemClock.elapsedRealtime()
+        if (msToken.isEmpty() || now - msTokenAt > 8 * 60_000L) {
+            val t = http("https://edge.microsoft.com/translate/auth").trim()
+            if (t.isEmpty()) throw java.io.IOException("no token")
+            msToken = t
+            msTokenAt = now
+        }
+        val from = if (sl != null && sl != "sr") "&from=" + sl else ""
+        val body = JSONArray().put(JSONObject().put("Text", text)).toString()
+        val resp = try {
+            http("https://api-edge.cognitive.microsofttranslator.com/translate?api-version=3.0&to=ar" + from, "POST", body,
+                mapOf("Authorization" to "Bearer " + msToken, "Content-Type" to "application/json"))
+        } catch (e: java.io.IOException) {
+            if (e.message == "http 401") msToken = ""
+            throw e
+        }
+        val o = JSONArray(resp).getJSONObject(0)
+        val tr = o.getJSONArray("translations").getJSONObject(0).getString("text")
+        val det = o.optJSONObject("detectedLanguage")?.optString("language", "") ?: ""
+        val src = if (det.isNotEmpty()) det else (sl ?: "")
+        return TrResult(if (src == "ar") "" else tr.trim(), src)
+    }
+
+    private fun lingva(host: String, text: String, sl: String?): TrResult? {
+        val o = JSONObject(http("https://" + host + "/api/v1/" + (sl ?: "auto") + "/ar/" + enc(text).replace("+", "%20")))
+        val tr = o.optString("translation", "")
+        if (tr.isEmpty()) return null
+        val det = o.optJSONObject("info")?.optString("detectedSource", "") ?: ""
+        val src = if (det.isNotEmpty()) det else (sl ?: "")
+        return TrResult(if (src == "ar") "" else tr.trim(), src)
+    }
+
+    private fun mymemory(text: String, sl: String?): TrResult? {
+        if (text.length > 450) throw java.io.IOException("too long")
+        val o = JSONObject(http("https://api.mymemory.translated.net/get?q=" + enc(text) + "&langpair=" + (sl ?: "autodetect") + "%7Car"))
+        val st = "" + o.opt("responseStatus")
+        if (st != "200") throw java.io.IOException("status " + st)
+        val tr = o.getJSONObject("responseData").optString("translatedText", "")
+        if (tr.isEmpty()) return null
+        return TrResult(tr.trim(), sl ?: "")
+    }
+
+    // ------------------------------------------------------------------ choosing / racing the services
+
+    private class Provider(val name: String, startMs: Double, val run: (String, String?) -> TrResult?) {
+        @Volatile var failUntil = 0L
+        @Volatile var fails = 0
+        @Volatile var ema = startMs
+        @Volatile var ok = 0
+        @Volatile var bad = 0
+        @Volatile var err = ""
+    }
+
+    private val providers = listOf(
+        Provider("google", 500.0) { t, s -> google(t, s) },
+        Provider("microsoft", 650.0) { t, s -> microsoft(t, s) },
+        Provider("google2", 750.0) { t, s -> google2(t, s) },
+        Provider("lingva", 950.0) { t, s -> lingva("lingva.ml", t, s) },
+        Provider("lingva2", 1000.0) { t, s -> lingva("lingva.garudalinux.org", t, s) },
+        Provider("mymemory", 1200.0) { t, s -> mymemory(t, s) }
+    )
+
+    private fun runProvider(p: Provider, text: String, sl: String?): TrResult? {
+        val t0 = SystemClock.elapsedRealtime()
         return try {
-            val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-            c.connectTimeout = 6000
-            c.readTimeout = 8000
-            c.setRequestProperty("User-Agent", UA)
-            c.setRequestProperty("Connection", "keep-alive")
-            if (c.responseCode !in 200..299) {
-                try { c.errorStream?.close() } catch (e: Exception) { }
-                return null
-            }
-            c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-        } catch (e: Exception) { null }
+            val r = p.run(text, sl)
+            if (r == null || (r.ar.isEmpty() && r.src != "ar")) throw java.io.IOException("empty answer")
+            p.ema = p.ema * 0.7 + (SystemClock.elapsedRealtime() - t0) * 0.3
+            p.fails = 0
+            p.failUntil = 0L
+            p.ok++
+            p.err = ""
+            r
+        } catch (e: Exception) {
+            p.bad++
+            p.fails = minOf(p.fails + 1, 6)
+            p.err = e.message ?: e.javaClass.simpleName
+            p.failUntil = SystemClock.elapsedRealtime() + minOf(120_000L, 8_000L shl p.fails)
+            null
+        }
     }
 
-    /** Keeps the connection warm while the feature is on (called now and then). */
-    fun ping() {
-        fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ar&dt=t&q=ok")
+    private fun candidates(): List<Provider> {
+        val now = SystemClock.elapsedRealtime()
+        val healthy = providers.filter { it.failUntil <= now }.sortedBy { it.ema }
+        val cooling = providers.filter { it.failUntil > now }.sortedBy { it.failUntil }
+        return (healthy + cooling).take(4)
     }
 
-    /** Arabic text, "" if the text is already Arabic, null on failure. */
-    fun toArabic(text: String, sl: String? = null): String? {
+    /**
+     * Arabic text and the detected language; null when every service failed. [sl] = source language when it is
+     * known, null = the service detects it.
+     */
+    fun translate(text: String, sl: String?): TrResult? {
         synchronized(cache) { val c = cache[text]; if (c != null) return c }
-        if (arabicRatio(text) > 0.6f) return ""
-        val gap = 100L - (SystemClock.elapsedRealtime() - lastReq)
-        if (gap > 0) try { Thread.sleep(gap) } catch (e: Exception) { }
-        lastReq = SystemClock.elapsedRealtime()
-        val body = fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=" + (sl ?: "auto") + "&tl=ar&dt=t&q=" +
-            URLEncoder.encode(text, "UTF-8"))
-        if (body == null) return alt(text)
-        return try {
-            val arr = JSONArray(body)
-            val segs = arr.getJSONArray(0)
-            val sb = StringBuilder()
-            for (i in 0 until segs.length()) {
-                val sg = segs.optJSONArray(i) ?: continue
-                sb.append(sg.optString(0, ""))
+        if (arabicRatio(text) > 0.6f) return TrResult("", "ar")
+        val cands = candidates()
+        if (cands.isEmpty()) return null
+        val cs = ExecutorCompletionService<TrResult?>(pool)
+        var idx = 0
+        var started = 0
+        var done = 0
+        val deadline = SystemClock.elapsedRealtime() + 9000L
+        fun startNext(): Boolean {
+            if (idx >= cands.size) return false
+            val p = cands[idx++]
+            started++
+            cs.submit(Callable<TrResult?> { runProvider(p, text, sl) })
+            return true
+        }
+        startNext()
+        while (done < started) {
+            val remain = deadline - SystemClock.elapsedRealtime()
+            if (remain <= 0L) break
+            // slow? ask the next service too and use whichever answers first
+            val hedge = if (idx < cands.size) minOf(remain, maxOf(500L, minOf(1100L, (cands[0].ema * 1.3).toLong()))) else remain
+            val f = cs.poll(hedge, TimeUnit.MILLISECONDS)
+            if (f == null) {
+                startNext()
+                continue
             }
-            lastDetected = arr.optString(2, "")
-            val out = if (arr.optString(2, "") == "ar") "" else sb.toString().trim()
-            synchronized(cache) { cache[text] = out }
-            out
-        } catch (e: Exception) { alt(text) }
+            done++
+            val r = try { f.get() } catch (e: Exception) { null }
+            if (r != null) {
+                lastDetected = r.src
+                synchronized(cache) { cache[text] = r }
+                return r
+            }
+            startNext()
+        }
+        return null
     }
 
-    /** Second free endpoint, used only when the first one fails. */
-    private fun alt(text: String): String? {
-        val body = fetch("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=ar&q=" +
-            URLEncoder.encode(text, "UTF-8")) ?: return null
+    /** Compatibility: Arabic text, "" if already Arabic, null on failure. */
+    fun toArabic(text: String, sl: String? = null): String? = translate(text, sl)?.ar
+
+    /** Keeps the fastest service's connection warm. */
+    fun ping() {
+        val p = candidates().firstOrNull() ?: return
+        runProvider(p, "ok", "en")
+    }
+
+    fun status(): String = providers.joinToString("; ") {
+        val now = SystemClock.elapsedRealtime()
+        it.name + " ok=" + it.ok + " bad=" + it.bad + " " + it.ema.toInt() + "ms" +
+            (if (it.failUntil > now) " PAUSED " + ((it.failUntil - now) / 1000) + "s (" + it.err + ")" else "")
+    }
+
+    /** One live test per service (in parallel). */
+    fun selfTest(): String {
+        val tasks = providers.map { p -> Callable<String> {
+            val t0 = SystemClock.elapsedRealtime()
+            try {
+                val r = p.run("Hello, how are you today?", "en")
+                p.name + " " + (SystemClock.elapsedRealtime() - t0) + "ms " + (if (r != null && r.ar.isNotEmpty()) "OK" else "empty")
+            } catch (e: Exception) {
+                p.name + " FAIL " + (e.message ?: e.javaClass.simpleName)
+            }
+        } }
         return try {
-            val a = JSONArray(body)
-            val e0 = a.opt(0)
-            var t = ""
-            var src = ""
-            if (e0 is JSONArray) { t = e0.optString(0, ""); src = e0.optString(1, "") } else if (e0 is String) t = e0
-            val out = if (src == "ar") "" else t.trim()
-            if (out.isNotEmpty() || src == "ar") synchronized(cache) { cache[text] = out }
-            if (out.isEmpty() && src != "ar") null else out
-        } catch (e: Exception) { null }
+            pool.invokeAll(tasks, 9, TimeUnit.SECONDS).joinToString(" , ") { f -> try { f.get() } catch (e: Exception) { "timeout" } }
+        } catch (e: Exception) { "error" }
     }
 }
 
@@ -598,7 +765,7 @@ class ScreenTranslator(private val svc: KeyService) {
             requestScan()
             if (OcrEngine.lastUse > 0 && System.currentTimeMillis() - OcrEngine.lastUse > 1200000L) OcrEngine.release()
             val nowP = SystemClock.elapsedRealtime()
-            if (nowP - lastPing > 45000L) {
+            if (nowP - lastPing > 120000L) {
                 lastPing = nowP
                 exec?.execute { try { Translator.ping() } catch (e: Exception) { } }
             }
@@ -641,7 +808,7 @@ class ScreenTranslator(private val svc: KeyService) {
             t.start()
             thread = t
             worker = Handler(t.looper)
-            exec = Executors.newSingleThreadExecutor()
+            exec = Executors.newFixedThreadPool(3)
             movieExec = Executors.newSingleThreadExecutor()
             ocrExec = Executors.newSingleThreadExecutor { r ->
                 val th = Thread(r, "trans-ocr")
@@ -1124,49 +1291,51 @@ class ScreenTranslator(private val svc: KeyService) {
     private val tLock = Any()
     private var seqCounter = 0
     @Volatile private var shownSeq = 0
-    private var pendText: String? = null
-    private var pendSeq = 0
+    private val inFlight = AtomicInteger(0)
+    @Volatile private var lastRejected = ""
 
-    /** Lines of one subtitle are translated together as one sentence. Results are shown in order, never discarded. */
+    /**
+     * Lines of one subtitle are translated together as one sentence. Several sentences can be in flight at once;
+     * results are shown in order and never discarded. Only the selected languages are translated: if the service
+     * says the text is in another language, nothing is shown.
+     */
     private fun translate(text0: String) {
         val text = text0.replace('\n', ' ').replace(Regex("\\s+"), " ").trim()
+        if (text.length < 2) return
         val ex = exec ?: return
+        if (lastRejected.isNotEmpty() && sameText(text, lastRejected)) return   // that language is not selected
+        if (inFlight.get() >= 4) { lastText = ""; return }                      // overloaded: the next read tries again
         val my = synchronized(tLock) { seqCounter++; seqCounter }
-        val start = synchronized(tLock) {
-            if (busy) { pendText = text; pendSeq = my; false } else { busy = true; true }
-        }
-        if (!start) return
+        inFlight.incrementAndGet()
         ex.execute {
-            var cur = text
-            var curSeq = my
-            while (true) {
-                val sl = LangDetect.detect(cur, langMask, curLang)
-                if (sl != null) curLang = sl
-                val ar = try { Translator.toArabic(cur, sl) } catch (e: Exception) { null }
-                if (sl == null) {
-                    val d = Translator.lastDetected
-                    if (d.isNotEmpty() && LangDetect.isEnabled(d, langMask)) curLang = d
-                }
-                if (ar == null) {
-                    lastText = ""          // failed (network): try again on the next read
-                } else if (curSeq > shownSeq) {
-                    shownSeq = curSeq
-                    if (ar.isEmpty()) {
-                        lastAr = ""
-                        ui.post { hideTrans() }
+            try {
+                val det = LangDetect.detectScored(text, langMask, curLang)
+                val explicit: String? = if (det.code != null && det.score >= 4) det.code else null
+                val res = try { Translator.translate(text, explicit) } catch (e: Exception) { null }
+                if (res == null) {
+                    lastText = ""                         // every service failed: try again on the next read
+                } else if (my > shownSeq) {
+                    val fromService = LangDetect.canonical(res.src, langMask)
+                    val allowed = explicit != null || fromService != null || (det.code != null && det.score >= 3)
+                    shownSeq = my
+                    if (!allowed) {
+                        lastRejected = text                // a language that was not selected: nothing is translated
                     } else {
-                        lastAr = ar
-                        val a: String = ar
-                        ui.post { showTrans(a) }
+                        lastRejected = ""
+                        val lang = explicit ?: fromService ?: det.code
+                        if (lang != null) curLang = lang
+                        if (res.ar.isEmpty()) {
+                            lastAr = ""
+                            ui.post { hideTrans() }
+                        } else {
+                            lastAr = res.ar
+                            val a: String = res.ar
+                            ui.post { showTrans(a) }
+                        }
                     }
                 }
-                val nxt: Pair<String, Int>? = synchronized(tLock) {
-                    val t = pendText
-                    if (t == null) { busy = false; null } else { pendText = null; Pair(t, pendSeq) }
-                }
-                if (nxt == null) break
-                cur = nxt.first
-                curSeq = nxt.second
+            } finally {
+                inFlight.decrementAndGet()
             }
         }
     }
@@ -1193,6 +1362,7 @@ class ScreenTranslator(private val svc: KeyService) {
         val r = Rect(rect[0], rect[1], rect[2], rect[3])
         val nodes = try { RegionText.read(svc, r) } catch (e: Exception) { "" }
         sb.append(" | languages: ").append(LangDetect.CODES.filterIndexed { i, _ -> ((langMask shr i) and 1) == 1 }.joinToString(",")).append(" current=").append(curLang ?: "-")
+        sb.append(" | translation sources: ").append(Translator.status()).append(" | live test: ").append(Translator.selfTest())
         sb.append(" | text elements: ").append(if (nodes.isEmpty()) "none" else nodes.take(100).replace('\n', ' '))
         if (Build.VERSION.SDK_INT < 30) return sb.append(" | screenshot: needs Android 11+").toString()
         val latch = CountDownLatch(1)
